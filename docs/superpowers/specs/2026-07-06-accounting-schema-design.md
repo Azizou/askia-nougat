@@ -77,7 +77,9 @@ Query    ◀──────────────────────�
   merged via `INSERT OR IGNORE` on event `id` and replayed. No lock file, no whole-DB-file
   sync. (Sync engine is out of scope for this spec but the model is built for it.)
 
-## 4. Event Vocabulary (Source of Truth)
+## 4. Event Store (Source of Truth)
+
+### 4.1 Event envelope
 
 Every event shares this envelope:
 
@@ -96,24 +98,98 @@ interface LedgerEvent {
 }
 ```
 
+### 4.2 Event store table
+
+This is the single physical source of truth from which all projections rebuild:
+
+```sql
+CREATE TABLE events (
+  id         TEXT PRIMARY KEY,          -- hlc + deviceId (globally unique, sortable)
+  hlc        TEXT NOT NULL,
+  device_id  TEXT NOT NULL,
+  user_id    TEXT NOT NULL,
+  seq        INTEGER NOT NULL,
+  type       TEXT NOT NULL,
+  payload    BLOB NOT NULL,             -- jsonb
+  created_at INTEGER NOT NULL,
+  UNIQUE (device_id, seq)               -- gap detection per device
+);
+CREATE INDEX events_hlc ON events (hlc);   -- replay order
+```
+
+### 4.3 Bootstrap / genesis
+
+On first launch, the app emits a deterministic genesis sequence. All genesis events use:
+- `userId: "system"` — a reserved, well-known id that exists by convention (no
+  `UserRegistered` event creates it; it is a constant the projector recognizes).
+- `deviceId`: this device's generated UUID.
+
+Genesis sequence (order matters — each event can reference entities from prior events):
+1. `UserRegistered` — the owner/operator of this installation.
+2. `AccountOpened` × N — the seeded chart of accounts (see §5.2).
+3. (Optional) `OpeningBalancesRecorded` — if migrating an existing business (see below).
+
+After genesis, all subsequent events use the real owner's `userId`.
+
+### 4.4 Event vocabulary
+
+#### Setup / master data events (no journal posting)
+
+| Event | Payload (essentials) | Notes |
+|---|---|---|
+| `UserRegistered` | userId, name, role? | Creates a row in `users`. First real user is seeded at genesis. |
+| `AccountOpened` | accountId, name, type, normalSide | Creates a row in `accounts`. |
+| `ItemDefined` | itemId, sku, name, unit | Creates a row in `items`. |
+| `PartyCreated` | partyId, name, kind ('supplier'\|'customer'\|'both') | Creates a row in `parties`. Must precede any purchase/sale referencing this party. |
+
+#### Master data mutation events (no journal posting)
+
+| Event | Payload (essentials) | Notes |
+|---|---|---|
+| `UserUpdated` | userId, changes: {name?, role?} | Patches the `users` doc. |
+| `AccountUpdated` | accountId, changes: {name?} | Patches the `accounts` doc. Type/normalSide are immutable once opened. |
+| `ItemUpdated` | itemId, changes: {name?, sku?, unit?, active?} | Patches the `items` doc. Setting `active: false` deactivates the item. |
+| `PartyUpdated` | partyId, changes: {name?, kind?} | Patches the `parties` doc. |
+
+#### Transactional events (with journal postings)
+
 | Event | Payload (essentials) | Implied journal posting |
 |---|---|---|
-| `AccountOpened` | accountId, name, type, normalSide | — (chart of accounts setup) |
-| `ItemDefined` | itemId, sku, name, unit | — (master data) |
 | `PurchaseRecorded` | purchaseId, supplierId, date, terms, lines[]: {itemId, qty, unitCostMinor} | Dr Inventory / Cr Bank *or* A/P |
 | `SaleRecorded` | saleId, customerId, date, terms, lines[]: {itemId, qty, unitPriceMinor, lotConsumption[]: {lotId, qtyTaken, unitCostMinor}} | Dr Bank/AR, Cr Sales **and** Dr COGS, Cr Inventory |
 | `PaymentMade` | paymentId, supplierId, amountMinor, date | Dr A/P / Cr Bank |
 | `PaymentReceived` | paymentId, customerId, amountMinor, date | Dr Bank / Cr A/R |
-| `ExpenseRecorded` | expenseId, accountId, amountMinor, date | Dr Expense / Cr Bank *or* A/P |
-| `TransactionReversed` | targetEventId, reason | negates the target's postings |
+| `ExpenseRecorded` | expenseId, accountId, amountMinor, date, memo? | Dr Expense / Cr Bank *or* A/P |
+| `TransferRecorded` | transferId, fromAccountId, toAccountId, amountMinor, date, memo? | Dr toAccount / Cr fromAccount |
+| `InventoryAdjusted` | adjustmentId, lines[]: {itemId, lotId, qtyDelta, reasonCode}, date | Dr/Cr Inventory vs Shrinkage/Write-off expense account (balanced) |
+| `OpeningBalancesRecorded` | date, accountBalances[]: {accountId, debitMinor, creditMinor}, lots[]: {itemId, lotId, qty, unitCostMinor, acquiredAt, supplierId?} | Balanced debits/credits across all accounts; creates initial lots |
+| `SaleReturnRecorded` | returnId, originalSaleId, lines[]: {itemId, qty, lotReturns[]: {lotId, qtyReturned, unitCostMinor}}, date | Reverses revenue + restores inventory for returned units only |
+| `PurchaseReturnRecorded` | returnId, originalPurchaseId, lines[]: {itemId, qty, lotId, unitCostMinor}, date | Reverses inventory + reduces A/P (or gets refund to bank) |
+| `TransactionReversed` | targetEventId, reason | Fully negates the target's postings (use for complete voiding; for partial, use return events) |
 
-Rules:
+### 4.5 Rules
+
 - **`SaleRecorded.lines[].lotConsumption` is chosen at command time** (default oldest-lot-
   first, user-overridable since costing is specific-ID) and **frozen into the event**. COGS is
   computed then, not at replay.
 - A sale emits **both** the revenue posting and the cost posting inside the single event, so
   they are atomic.
-- **Corrections are always `TransactionReversed` + a new event**, never a mutation or delete.
+- **Corrections:** use `TransactionReversed` for full voidings. Use `SaleReturnRecorded` /
+  `PurchaseReturnRecorded` for partial returns (returns specific units to specific lots).
+  Never a mutation or delete.
+- **Master data updates** use patch semantics: the event carries only the changed fields, and
+  the projector merges them into the existing `doc` JSONB. Type/normalSide on accounts are
+  immutable once set (changing them would silently corrupt historical balances).
+- **`InventoryAdjusted`** always posts a balanced journal entry (typically Dr Inventory
+  Shrinkage expense / Cr Inventory for losses, reversed for found stock). The `reasonCode`
+  field (e.g. 'shrinkage', 'damage', 'count_correction', 'found') is for reporting; the
+  journal posting is the same shape regardless.
+- **`TransferRecorded`** handles any movement between accounts: cash → bank, bank → bank,
+  or internal reclassifications. It's a simple balanced Dr/Cr between two accounts.
+- **`OpeningBalancesRecorded`** is a one-time genesis event for existing businesses. It sets
+  all account balances and creates initial inventory lots in a single balanced posting. The
+  balancing account is typically Owner Capital / Retained Earnings. May only appear once in
+  the event log (enforced by the command handler).
 
 ## 5. Master Data (Projections)
 
@@ -121,6 +197,8 @@ All money in integer minor units. All tables use the `doc` (JSONB) + generated-c
 pattern: flexible JSON body, scalar columns projected out only where indexed/queried.
 
 ### 5.1 `users` — the *who*
+Created by `UserRegistered`, updated by `UserUpdated`. The reserved `"system"` id is never
+stored as a row — it's a constant the app recognizes for genesis-authored events.
 ```sql
 CREATE TABLE users (
   id          TEXT PRIMARY KEY,
@@ -133,6 +211,8 @@ Stable id referenced by every event's `userId`. One row today; multi-user later 
 schema change.
 
 ### 5.2 `accounts` — chart of accounts
+Created by `AccountOpened`, name updated by `AccountUpdated`. Type and normalSide are
+**immutable** once set (changing them would silently corrupt historical balance calculations).
 ```sql
 CREATE TABLE accounts (
   id          TEXT PRIMARY KEY,
@@ -150,6 +230,9 @@ Cash, Bank, Inventory, Accounts Receivable (assets); Accounts Payable, Tax Payab
 (liabilities); Owner Capital (equity); Sales (income); COGS, Rent, Wages (expenses).
 
 ### 5.3 `items` — catalog
+Created by `ItemDefined`, updated by `ItemUpdated`. Deactivation is a soft-delete
+(`active: false`) — historical events still reference the item; projections filter on `active`
+for user-facing selectors but never hide it from reports.
 ```sql
 CREATE TABLE items (
   id     TEXT PRIMARY KEY,
@@ -186,6 +269,8 @@ hand and its value; `acquired_at` → age. **Aggregate lot value must always equ
 GL account balance** — the built-in integrity check.
 
 ### 5.5 `parties` — suppliers & customers
+Created by `PartyCreated`, updated by `PartyUpdated`. Must exist before any purchase/sale
+references the party (the command handler enforces this).
 ```sql
 CREATE TABLE parties (
   id   TEXT PRIMARY KEY,
@@ -193,6 +278,7 @@ CREATE TABLE parties (
   name TEXT GENERATED ALWAYS AS (doc ->> 'name') VIRTUAL,
   kind TEXT GENERATED ALWAYS AS (doc ->> 'kind') VIRTUAL   -- 'supplier'|'customer'|'both'
 );
+CREATE INDEX parties_kind ON parties (kind);
 ```
 
 ## 6. Transactional Read Model (Projections)
@@ -391,3 +477,10 @@ FROM inventory_lots WHERE qty_remaining > 0 GROUP BY bucket;
 - **Incremental vs full projection rebuild** on sync merge: start with full rebuild for
   correctness; optimize to incremental later if needed.
 - **Multi-currency and tax computation**: deferred; the account structure leaves room for both.
+- **Discounts / promotions**: not modeled. If needed, add a `discount_minor` field to
+  `sale_lines` and adjust the revenue posting accordingly. Or handle as a price adjustment
+  (different `unitPriceMinor`).
+- **Inventory write-down / revaluation**: `InventoryAdjusted` handles quantity adjustments.
+  Value write-downs (marking inventory down without physical loss) would need a separate
+  `InventoryRevalued` event if required later — not common for specific-ID costing where each
+  lot holds its actual cost.
