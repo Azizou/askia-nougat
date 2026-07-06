@@ -264,11 +264,23 @@ reviews v4–v6). Categories:
   events, `OpeningBalancesRecorded`, and `TransactionReversed` itself. The handler must also
   reject reversing an event that has already been reversed (track reversed target IDs),
   preventing double-negation.
-- **Reversal downstream guard:** reject `TransactionReversed` whose target has dependent
-  downstream events — e.g. a `SaleRecorded` with `payment_allocations` or a `SaleReturnRecorded`
-  against it, or a `PaymentReceived`/`PaymentMade` with allocations. The user must reverse the
-  downstream events first (no implicit cascade), keeping `outstanding_minor` / `party_balances`
-  consistent.
+- **Reversal downstream guard:** reject `TransactionReversed` whose target `T` has any blocking
+  downstream dependency, so the user reverses dependents first (no implicit cascade), keeping
+  `outstanding_minor` / `party_balances` / lot quantities consistent. `T` has a blocking
+  dependency if any *later, not-yet-reversed* event:
+  1. **allocates against an invoice `T` created** — a `payment_allocations` row whose
+     `target_id` is `T`'s sale/purchase; **or**
+  2. **is a return against `T`** — a `returns` row whose `original_id` is `T`; **or**
+  3. **draws on unallocated credit `T` created** — a `PaymentAllocated` whose `payment_id` is
+     `T`'s payment, when `T` is a `PaymentMade` / `PaymentReceived`; **or**
+  4. **consumed a lot `T` created** — covered by the lot-source void guard above (listed here
+     for completeness of the dependency relation).
+
+  Edge (3) is the non-obvious one: a pure prepayment writes *zero* `payment_allocations` rows on
+  itself, so a later `PaymentAllocated` that drew its credit is only discoverable by the reverse
+  reference (`PaymentAllocated.payment_id → T`), not by allocations on `T`. Reversing `T` without
+  first reversing that `PaymentAllocated` would drive the party's `unallocated_*` credit negative
+  (breaks reconciliation check #8).
 - **Value validation (all transactional events):** every line `qty > 0`; monetary amounts
   `>= 0` (and `> 0` where zero is meaningless, e.g. payment/expense/transfer amounts); every
   transactional event has at least one line.
