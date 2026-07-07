@@ -1,0 +1,4 @@
+# Re-include planning docs that the global ~/.gitignore excludes via `plans/`.
+# Must negate the DIRECTORY (not files under it): git won't descend into an
+# excluded directory, so `!.../plans/file.md` alone would not work.
+!docs/superpowers/plans/
