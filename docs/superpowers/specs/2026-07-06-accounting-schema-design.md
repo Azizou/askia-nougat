@@ -84,12 +84,12 @@ Query    ◀──────────────────────�
 Every event shares this envelope:
 
 ```ts
-type EventId = string; // `${hlc}-${deviceId}` — globally unique, sortable
+type EventId = string; // equals the hlc stamp verbatim — globally unique, sortable
 
 interface LedgerEvent {
-  id: EventId;
-  hlc: string;        // hybrid logical clock (sort key — NOT createdAt)
-  deviceId: string;   // where authored (sync + audit)
+  id: EventId;        // = hlc (the HLC already encodes deviceId as its last segment)
+  hlc: string;        // hybrid logical clock `{phys}:{ctr}:{deviceId}` (sort key — NOT createdAt)
+  deviceId: string;   // where authored (sync + audit); also the hlc's trailing segment
   userId: string;     // who authored (audit) — references users(id)
   seq: number;        // per-device monotonic counter (gap detection)
   type: string;
@@ -104,7 +104,7 @@ This is the single physical source of truth from which all projections rebuild:
 
 ```sql
 CREATE TABLE events (
-  id         TEXT PRIMARY KEY,          -- hlc + deviceId (globally unique, sortable)
+  id         TEXT PRIMARY KEY,          -- = hlc stamp (which already ends in deviceId); globally unique, sortable
   hlc        TEXT NOT NULL,
   device_id  TEXT NOT NULL,
   user_id    TEXT NOT NULL,
