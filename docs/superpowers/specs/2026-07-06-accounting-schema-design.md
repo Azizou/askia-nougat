@@ -160,14 +160,14 @@ After genesis, all subsequent events use the real owner's `userId`.
 | `PaymentMade` | paymentId, supplierId, amountMinor, date, allocations[]: {purchaseId, amountMinor} | Dr A/P / Cr Bank |
 | `PaymentReceived` | paymentId, customerId, amountMinor, date, allocations[]: {saleId, amountMinor} | Dr Bank / Cr A/R |
 | `PaymentAllocated` | paymentId, partyId, allocations[]: {targetId, targetType, amountMinor}, date | — (no journal posting; applies an existing unallocated credit to invoices) |
-| `ExpenseRecorded` | expenseId, accountId, amountMinor, date, terms, memo? | Dr Expense / Cr Bank *or* A/P |
+| `ExpenseRecorded` | expenseId, accountId, amountMinor, date, terms, supplierId?, memo? | Dr Expense / Cr Bank (cash) *or* A/P (credit) |
 | `TransferRecorded` | transferId, fromAccountId, toAccountId, amountMinor, date, memo? | Dr toAccount / Cr fromAccount |
 | `InventoryAdjusted` | adjustmentId, date, lines[]: {itemId, lotId, qtyDelta (negative only), reasonCode, expenseAccountId} | Dr expenseAccountId / Cr Inventory (write-down of an existing lot) |
 | `InventoryFound` | foundId, date, lines[]: {itemId, lotId, qty, unitCostMinor, acquiredAt, incomeAccountId} | Dr Inventory / Cr `incomeAccountId` (defaults to `system_role = 'inventory_gain'`; creates a NEW lot for found stock) |
 | `OpeningBalancesRecorded` | date, accountBalances[]: {accountId, debitMinor, creditMinor}, lots[]: {itemId, lotId, qty, unitCostMinor, acquiredAt, supplierId?} | Balanced debits/credits across all accounts; creates initial lots |
 | `SaleReturnRecorded` | returnId, originalSaleId, date, lines[]: {itemId, qty, unitPriceMinor, lotReturns[]: {lotId, qtyReturned, unitCostMinor}} | Reverses revenue + restores inventory for returned units only |
 | `PurchaseReturnRecorded` | returnId, originalPurchaseId, date, lines[]: {itemId, qty, lotId, unitCostMinor} | Reverses inventory + reduces A/P (or gets refund to bank) |
-| `TransactionReversed` | targetEventId, reason | Fully negates the target's postings (use for complete voiding; for partial, use return events) |
+| `TransactionReversed` | targetEventId, targetType, reason, reversalJournalLines[]: {accountId, debitMinor, creditMinor} | Fully negates the target's postings (use for complete voiding; for partial, use return events). `reversalJournalLines` is the frozen, pre-negated set of journal lines (computed at command time from the target's `journal_lines`, with debit/credit swapped — see §4.5 contract clause 1); the projector posts them verbatim. Lines carry `accountId` (not `system_role`): account ids are stable (frozen in `AccountOpened`), and a reversal may touch a user-created account whose `system_role` is NULL and thus unnameable. |
 
 ### 4.5 Rules
 
@@ -274,23 +274,38 @@ reviews v4–v6). Categories:
   3. **draws on unallocated credit `T` created** — a `PaymentAllocated` whose `payment_id` is
      `T`'s payment, when `T` is a `PaymentMade` / `PaymentReceived`; **or**
   4. **consumed a lot `T` created** — covered by the lot-source void guard above (listed here
-     for completeness of the dependency relation).
+     for completeness of the dependency relation); **or**
+  5. **consumed units `T` restored** — when `T` is a **lot-restoring** event
+     (`SaleReturnRecorded`), reject if any lot it restored has since fallen below the level it
+     restored to (i.e. later consumption drew on the restored units). Reversing `T` re-decrements
+     `qty_remaining` by the restored amount (contract clause 2), so if those units were already
+     re-consumed the lot would go negative. Equivalent check: reject if, for any restored lot,
+     `qty_remaining < qty_restored_by_T`.
 
   Edge (3) is the non-obvious one: a pure prepayment writes *zero* `payment_allocations` rows on
   itself, so a later `PaymentAllocated` that drew its credit is only discoverable by the reverse
   reference (`PaymentAllocated.payment_id → T`), not by allocations on `T`. Reversing `T` without
   first reversing that `PaymentAllocated` would drive the party's `unallocated_*` credit negative
-  (breaks reconciliation check #8).
+  (breaks reconciliation check #8). Edge (5) is the mirror of edge (4) for the lot-restoring
+  direction — both keep a reversal from driving a lot negative.
 - **Value validation (all transactional events):** every line `qty > 0`; monetary amounts
   `>= 0` (and `> 0` where zero is meaningless, e.g. payment/expense/transfer amounts); every
   transactional event has at least one line.
 - **Self-transfer guard:** `TransferRecorded` must reject `fromAccountId == toAccountId`.
 - **Expense-account-type guard:** `ExpenseRecorded.accountId` must resolve to an `expense`-type
   account (otherwise the P&L is silently wrong).
+- **Return-against-reversed guard:** the command handler must reject a `SaleReturnRecorded` /
+  `PurchaseReturnRecorded` whose target invoice has `reversed = 1` — a voided sale/purchase no
+  longer exists economically, so restoring its inventory or reversing its revenue is invalid.
+- **Credit-expense party guard:** a `credit`-terms `ExpenseRecorded` must carry a `supplierId`,
+  and the projector must increase that supplier's `payable_minor` (mirroring a credit purchase).
+  Cash expenses carry no party. Without this, a credit expense posts to the A/P GL with no
+  `party_balances` counterpart and reconciliation check #4's A/P net form
+  (`Σpayable − Σunallocated_dr = A/P GL`) fails on every credit expense.
 - **Lot/item-match guard:** in any event that references a lot per line (**lot-consuming**,
   **lot-restoring**, and lot-creating events), each `lotId` must belong to the same `itemId`
   as its line. (The oversell guard checks quantity, not item identity.)
-- **`TransactionReversed` contract (three-part):** on reversal the projector applies, as
+- **`TransactionReversed` contract (four-part):** on reversal the projector applies, as
   applicable to the target:
   1. **Financial:** apply the frozen reversal journal lines carried in the payload (computed
      at command time, like COGS). For `PaymentAllocated` targets this is a no-op — they post
@@ -311,11 +326,26 @@ reviews v4–v6). Categories:
      `payment_allocations` rows and reverse their effect — re-open the `outstanding_minor` they
      had settled and restore the party's `unallocated_*` credit and
      `receivable_minor` / `payable_minor`.
+  4. **Void marker:** when the target is a `SaleRecorded` / `PurchaseRecorded`, set that row's
+     `reversed = 1` in `sales` / `purchases`. The `sale_lines` / `lot_consumptions` (and their
+     purchase equivalents) are **left in place** for audit, so every `sale_lines`-reading report
+     and reconciliation check #2 MUST filter `WHERE reversed = 0` to exclude voided sales.
+     Otherwise the frozen profit engine (unchanged by reversal) would disagree with the journal
+     (netted to zero by clause 1), and reports would count a voided sale.
 
   Clause 3 mirrors clause 2 for the settlement dimension: reversing money movement must unwind
   what it settled, not just its Dr/Cr. Prefer `SaleReturnRecorded` / `PurchaseReturnRecorded`
   for partial/real-world corrections; narrow `TransactionReversed` to full same-day voids of
   erroneous entries.
+- **Return payload shapes (pinned — projector reads these exactly):** `SaleReturnRecorded.lines`
+  is **nested** — one entry per item `{itemId, qty, unitPriceMinor, lotReturns[]: {lotId,
+  qtyReturned, unitCostMinor}}` — because a single returned item may come back across several
+  lots. The projector restores `qty_remaining` per `lotReturns` entry and writes one `return_lines`
+  row per lot return; `revenue_reversed = Σ qty·unitPriceMinor`, `cost_restored = Σ
+  qtyReturned·unitCostMinor` are **derived by the projector from the lines**, not frozen at the
+  payload top level. `PurchaseReturnRecorded.lines` is **flat** — `{itemId, qty, lotId,
+  unitCostMinor}` — one lot per line (a purchase return targets specific received lots). Emitters
+  MUST match these shapes field-for-field.
 - **Return → invoice/party-balance contract:** when a `SaleReturnRecorded` targets a **credit**
   sale that is still unpaid (or partially unpaid), the projector must reduce the original
   sale's `outstanding_minor` and the customer's `receivable_minor` by the returned revenue
@@ -485,7 +515,8 @@ CREATE TABLE sales (
   date              TEXT NOT NULL,
   terms             TEXT NOT NULL,       -- 'cash'|'credit'
   total_minor       INTEGER NOT NULL,
-  outstanding_minor INTEGER NOT NULL DEFAULT 0  -- derived: total_minor − allocated; 0 for cash
+  outstanding_minor INTEGER NOT NULL DEFAULT 0, -- derived: total_minor − allocated; 0 for cash
+  reversed          INTEGER NOT NULL DEFAULT 0  -- set to 1 by the projector when a TransactionReversed voids this sale
 );
 CREATE INDEX sales_date ON sales (date);
 CREATE INDEX sales_outstanding ON sales (outstanding_minor) WHERE outstanding_minor > 0;
@@ -525,7 +556,8 @@ CREATE TABLE purchases (
   date              TEXT NOT NULL,
   terms             TEXT NOT NULL,
   total_minor       INTEGER NOT NULL,
-  outstanding_minor INTEGER NOT NULL DEFAULT 0  -- derived: total_minor − allocated; 0 for cash
+  outstanding_minor INTEGER NOT NULL DEFAULT 0, -- derived: total_minor − allocated; 0 for cash
+  reversed          INTEGER NOT NULL DEFAULT 0  -- set to 1 by the projector when a TransactionReversed voids this purchase
 );
 CREATE INDEX purchases_date ON purchases (date);
 CREATE INDEX purchases_outstanding ON purchases (outstanding_minor) WHERE outstanding_minor > 0;
@@ -668,17 +700,24 @@ Deliberate redundancy between the journal and the specialized tables is a featur
 must agree, which catches bugs:
 1. **Inventory valuation:** `SUM(qty_remaining * unit_cost_minor)` over open lots must equal
    the Inventory GL account balance (account with `system_role = 'inventory'`).
-2. **Gross profit:** `SUM(revenue_minor - cogs_minor)` over `sale_lines` must equal
-   (Sales − COGS) from `journal_lines` over the same period (accounts with
-   `system_role IN ('sales', 'cogs')`).
+2. **Gross profit:** `SUM(revenue_minor - cogs_minor)` over `sale_lines` **of non-reversed sales**
+   (`WHERE reversed = 0`), net of returns, must equal (Sales − COGS) from `journal_lines` over the
+   same period (accounts with `system_role IN ('sales', 'cogs')`). Reversed sales are excluded
+   because clause 4 of the reversal contract nets their journal to zero while leaving `sale_lines`
+   in place for audit; returns are netted because a return moves the journal but not `sale_lines`.
 3. **Double-entry:** for every `txn_id`, `SUM(debit_minor) = SUM(credit_minor)`.
-4. **Party balances:** `party_balances` must equal the per-party A/R and A/P balances derived
-   from `journal_lines` (accounts with `system_role IN ('accounts_receivable', 'accounts_payable')`).
-5. **Invoice outstanding:** for each sale,
+4. **Party balances (net form):** because a payment posts its *full* amount to A/R / A/P (not just
+   the allocated portion), the identity is
+   `SUM(party_balances.receivable_minor) − SUM(unallocated_cr_minor) =` the A/R GL balance
+   (`system_role = 'accounts_receivable'`), and symmetrically
+   `SUM(payable_minor) − SUM(unallocated_dr_minor) =` the A/P GL balance. Reconciles the aggregate
+   (journal_lines has no `party_id`).
+5. **Invoice outstanding (terms-aware):** for a **credit** sale,
    `outstanding_minor = MAX(0, total_minor − allocated − returned)` where
    `allocated = SUM(payment_allocations.amount_minor WHERE target_id = sale.id)` and
-   `returned = SUM(returns.revenue_reversed_minor WHERE original_id = sale.id)`. The identical
-   identity holds for purchases (using `payable`/`cost_restored_minor`). Must be `>= 0`.
+   `returned = SUM(returns.revenue_reversed_minor WHERE original_id = sale.id)`. For a **cash**
+   sale, `outstanding_minor = 0` exactly. The identical identity holds for purchases (using
+   `payable`/`cost_restored_minor`). Must be `>= 0` for all rows.
 6. **Non-negative inventory:** `inventory_lots.qty_remaining >= 0` for all rows (enforced at
    command time by the oversell guard, verified here as a backstop).
 7. **Lot bounds:** `0 <= inventory_lots.qty_remaining <= inventory_lots.qty_received` for all
@@ -747,13 +786,17 @@ FROM inventory_lots WHERE qty_remaining > 0 GROUP BY bucket;
 ```
 
 ### 8.4 Reports that fall out for free
+Any report reading `sale_lines` (or `sales`) must join `sales` and filter `WHERE reversed = 0`
+to exclude voided sales (§4.5 reversal contract clause 4); §8.1, §8.2 gross, and the margin/seller
+reports below all carry this filter. Also note §8.1/§8.2's date windows use a parameterized anchor
+(`date(?, …)`) in the implementation, not a literal `'now'`, so tests are deterministic.
 - **Stock on hand:** `SELECT item_id, SUM(qty_remaining) FROM inventory_lots WHERE qty_remaining>0 GROUP BY item_id`.
 - **Inventory valuation:** `SUM(qty_remaining * unit_cost_minor)` (reconciles with Inventory GL via `system_role = 'inventory'`).
-- **Gross margin % per item:** `SUM(revenue-cogs)/SUM(revenue)` from `sale_lines` by item.
-- **Best/worst sellers:** `sale_lines` by item, ordered by `SUM(qty)` or profit.
+- **Gross margin % per item:** `SUM(revenue-cogs)/SUM(revenue)` from `sale_lines` (non-reversed) by item.
+- **Best/worst sellers:** `sale_lines` (non-reversed) by item, ordered by `SUM(qty)` or profit.
 - **Who owes us / whom we owe:** `party_balances` (total and unallocated credits).
 - **A/R & A/P aging:** `SELECT * FROM sales WHERE terms='credit' AND outstanding_minor > 0` bucketed by `date` — works because `outstanding_minor` is maintained by the projector from `payment_allocations`.
-- **Return rate per item:** `SUM(return_lines.qty) / SUM(sale_lines.qty)` grouped by item.
+- **Return rate per item:** `SUM(sale-return qty) / SUM(sale_lines.qty)` grouped by item — the numerator must filter `return_type = 'sale_return'` (a `returns` join), so supplier returns don't inflate the customer return rate.
 - **Age-at-sale / turnover:** `lot_consumptions → inventory_lots.acquired_at` vs `sales.date`.
 - **P&L / balance sheet:** `journal_lines` grouped by `accounts.type` over a date range.
 
