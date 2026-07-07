@@ -138,7 +138,7 @@ After genesis, all subsequent events use the real owner's `userId`.
 | Event | Payload (essentials) | Notes |
 |---|---|---|
 | `UserRegistered` | userId, name, role? | Creates a row in `users`. First real user is seeded at genesis. |
-| `AccountOpened` | accountId, name, type, normalSide | Creates a row in `accounts`. |
+| `AccountOpened` | accountId, name, type, normal, system_role? | Creates a row in `accounts`. |
 | `ItemDefined` | itemId, sku, name, unit | Creates a row in `items`. |
 | `PartyCreated` | partyId, name, kind ('supplier'\|'customer'\|'both') | Creates a row in `parties`. Must precede any purchase/sale referencing this party. |
 
@@ -147,7 +147,7 @@ After genesis, all subsequent events use the real owner's `userId`.
 | Event | Payload (essentials) | Notes |
 |---|---|---|
 | `UserUpdated` | userId, changes: {name?, role?} | Patches the `users` doc. |
-| `AccountUpdated` | accountId, changes: {name?} | Patches the `accounts` doc. Type/normalSide are immutable once opened. |
+| `AccountUpdated` | accountId, changes: {name?} | Patches the `accounts` doc. Type/normal are immutable once opened. |
 | `ItemUpdated` | itemId, changes: {name?, sku?, unit?, active?} | Patches the `items` doc. Setting `active: false` deactivates the item. |
 | `PartyUpdated` | partyId, changes: {name?, kind?} | Patches the `parties` doc. |
 
@@ -187,7 +187,7 @@ After genesis, all subsequent events use the real owner's `userId`.
   `PurchaseReturnRecorded` for partial returns (returns specific units to specific lots).
   Never a mutation or delete.
 - **Master data updates** use patch semantics: the event carries only the changed fields, and
-  the projector merges them into the existing `doc` JSONB. Type/normalSide on accounts are
+  the projector merges them into the existing `doc` JSONB. Type/normal on accounts are
   immutable once set (changing them would silently corrupt historical balances).
 - **`InventoryAdjusted` is write-down only** (negative `qtyDelta`): it decrements an existing
   lot's `qty_remaining` and posts Dr `expenseAccountId` / Cr Inventory. `expenseAccountId` is
@@ -384,7 +384,7 @@ Stable id referenced by every event's `userId`. One row today; multi-user later 
 schema change.
 
 ### 5.2 `accounts` — chart of accounts
-Created by `AccountOpened`, name updated by `AccountUpdated`. Type, normalSide, and
+Created by `AccountOpened`, name updated by `AccountUpdated`. Type, normal, and
 `system_role` are **immutable** once set (changing them would silently corrupt historical
 balance calculations and projector lookups).
 ```sql
