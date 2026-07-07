@@ -62,4 +62,37 @@ mod tests {
         apply_schema(&conn).unwrap();
         apply_schema(&conn).expect("second apply must not error");
     }
+
+    #[test]
+    fn apply_schema_creates_all_projection_tables() {
+        let conn = open_in_memory_with_schema().unwrap();
+        let expected = [
+            "users", "accounts", "items", "inventory_lots", "parties",
+            "journal_lines", "sales", "sale_lines", "lot_consumptions",
+            "purchases", "purchase_lines", "payments", "payment_allocations",
+            "party_balances", "returns", "return_lines", "expenses",
+            "events", "projection_cursor",
+        ];
+        for name in expected {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                    [name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1, "table {name} should exist");
+        }
+
+        for tbl in ["sales", "purchases"] {
+            let has_reversed: i64 = conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM pragma_table_info('{tbl}') WHERE name='reversed'"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(has_reversed, 1, "{tbl}.reversed column should exist");
+        }
+    }
 }
