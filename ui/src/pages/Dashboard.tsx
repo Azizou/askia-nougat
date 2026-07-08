@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { formatMoney, today } from "../lib";
+import { formatMoney, today , errorMessage } from "../lib";
 import { useI18n } from "../i18n";
 
 interface DashboardData {
@@ -55,7 +55,7 @@ export function Dashboard() {
       setItems(i);
       setError("");
     } catch (e: unknown) {
-      setError(String(e));
+      setError(errorMessage(e));
     }
   };
 

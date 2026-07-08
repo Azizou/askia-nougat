@@ -2,7 +2,7 @@ mod commands;
 mod error;
 mod state;
 
-use accounting_core::{apply_schema, Hlc, rehydrate_from_log, run_genesis};
+use accounting_core::{apply_schema, rebuild, Hlc, rehydrate_from_log, run_genesis};
 use state::AppState;
 use std::fs;
 use std::path::PathBuf;
@@ -18,7 +18,7 @@ fn init_state(app_data_dir: PathBuf) -> AppState {
     fs::create_dir_all(&dir).expect("create data dir");
     let path = dir.join("ledger.db");
 
-    let conn = rusqlite::Connection::open(&path).expect("open db");
+    let mut conn = rusqlite::Connection::open(&path).expect("open db");
     conn.pragma_update(None, "journal_mode", "WAL").ok();
     conn.pragma_update(None, "synchronous", "NORMAL").ok();
     conn.pragma_update(None, "foreign_keys", "ON").ok();
@@ -31,6 +31,10 @@ fn init_state(app_data_dir: PathBuf) -> AppState {
     if event_count == 0 {
         run_genesis(&conn, &mut hlc, now_ms(), "device-1", "owner-1", "Owner").expect("genesis");
     }
+
+    // Always rebuild projections on startup — ensures genesis events are projected
+    // and recovers from any interrupted prior session.
+    rebuild(&mut conn).expect("rebuild projections");
 
     AppState::new(conn, hlc)
 }

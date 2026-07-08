@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { majorToMinor, newId, today } from "../lib";
+import { majorToMinor, newId, today , errorMessage } from "../lib";
 import { useToast } from "../theme";
 import { useI18n } from "../i18n";
 
@@ -24,7 +24,7 @@ export function Payments() {
     try {
       setParties(await invoke<Party[]>("list_parties"));
     } catch (e: unknown) {
-      setError(String(e));
+      setError(errorMessage(e));
     }
   };
 
@@ -53,8 +53,8 @@ export function Payments() {
       setAmountMajor("");
       setDate(today());
     } catch (e: unknown) {
-      setError(String(e));
-      toast.push(String(e), "error");
+      setError(errorMessage(e));
+      toast.push(errorMessage(e), "error");
     } finally {
       setSubmitting(false);
     }

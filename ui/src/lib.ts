@@ -18,3 +18,9 @@ export function today(): string {
 export function newId(): string {
   return crypto.randomUUID();
 }
+
+export function errorMessage(e: unknown): string {
+  if (typeof e === "string") return e;
+  if (e && typeof e === "object" && "message" in e) return String((e as { message: unknown }).message);
+  try { return JSON.stringify(e); } catch { return "Unknown error"; }
+}

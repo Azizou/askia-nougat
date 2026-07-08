@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { formatMoney, majorToMinor, newId, today } from "../lib";
+import { formatMoney, majorToMinor, newId, today , errorMessage } from "../lib";
 import { useToast } from "../theme";
 import { useI18n } from "../i18n";
 
@@ -62,7 +62,7 @@ export function Purchases() {
       setParties(pt);
       setItems(it);
     } catch (e: unknown) {
-      setError(String(e));
+      setError(errorMessage(e));
     }
   };
 
@@ -117,8 +117,8 @@ export function Purchases() {
       toast.push(t.purchases.added);
       await refresh();
     } catch (e: unknown) {
-      setError(String(e));
-      toast.push(String(e), "error");
+      setError(errorMessage(e));
+      toast.push(errorMessage(e), "error");
     } finally {
       setSubmitting(false);
     }

@@ -66,13 +66,14 @@ function App() {
         </div>
       </header>
 
+      {!collapsed && <div className="sidebar-backdrop" onClick={() => setCollapsed(true)} />}
       <nav className={`sidebar${collapsed ? " collapsed" : ""}`}>
         <ul className="sidebar-nav">
           {NAV_ORDER.map((key) => (
             <li key={key}>
               <button
                 className={`nav-item${page === key ? " active" : ""}`}
-                onClick={() => setPage(key)}
+                onClick={() => { setPage(key); if (window.innerWidth <= 768) setCollapsed(true); }}
                 data-tooltip={t.nav[key]}
               >
                 <span className="nav-icon">{NAV_ICONS[key]}</span>

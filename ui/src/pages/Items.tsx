@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { newId } from "../lib";
+import { newId , errorMessage } from "../lib";
 import { useToast } from "../theme";
 import { useI18n } from "../i18n";
 
@@ -27,7 +27,7 @@ export function Items() {
     try {
       setItems(await invoke<Item[]>("list_items"));
     } catch (e: unknown) {
-      setError(String(e));
+      setError(errorMessage(e));
     }
   };
 
@@ -62,8 +62,8 @@ export function Items() {
       toast.push(t.items.added);
       await refresh();
     } catch (e: unknown) {
-      setError(String(e));
-      toast.push(String(e), "error");
+      setError(errorMessage(e));
+      toast.push(errorMessage(e), "error");
     } finally {
       setSubmitting(false);
     }
