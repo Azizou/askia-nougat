@@ -474,13 +474,11 @@ fn inventory_found(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
 fn opening_balances(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
     let p = &ev.payload;
     let date = ps(p, "date");
-    let mut li = 0usize;
-    for ab in parr(p, "accountBalances") {
+    for (li, ab) in parr(p, "accountBalances").iter().enumerate() {
         let account_id = ps(ab, "accountId");
         let debit = pi(ab, "debitMinor");
         let credit = pi(ab, "creditMinor");
         post_line(tx, &ev.id, &ev.id, li, account_id, debit, credit, date, Some("opening balance"))?;
-        li += 1;
     }
     for lot in parr(p, "lots") {
         let lot_id = ps(lot, "lotId");
@@ -581,8 +579,7 @@ fn purchase_return(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
     )?;
 
     let mut cost_restored = 0i64;
-    let mut li = 0usize;
-    for line in parr(p, "lines") {
+    for (li, line) in parr(p, "lines").iter().enumerate() {
         let item_id = ps(line, "itemId");
         let qty = pi(line, "qty");
         let unit_cost = pi(line, "unitCostMinor");
@@ -594,7 +591,6 @@ fn purchase_return(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
              VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6)",
             rusqlite::params![format!("{}#line#{li}", ev.id), return_id, item_id, qty, unit_cost, lot_id],
         )?;
-        li += 1;
     }
 
     tx.execute(
