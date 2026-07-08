@@ -3,6 +3,10 @@ name = "tauri-app"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "tauri_app"
+crate-type = ["staticlib", "cdylib", "lib"]
+
 [dependencies]
 accounting-core = { path = "../accounting-core" }
 tauri = { version = "2", features = [] }
