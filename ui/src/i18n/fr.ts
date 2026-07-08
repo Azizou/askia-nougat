@@ -12,6 +12,7 @@ export const fr = {
     purchases: "Achats",
     sales: "Ventes",
     payments: "Paiements",
+    faq: "Aide",
   },
   dashboard: {
     title: "Tableau de bord",
@@ -126,6 +127,43 @@ export const fr = {
     added: "Paiement enregistré avec succès.",
     hint: "Paiement enregistré comme acompte (sans affectation).",
     selectCustomer: "Sélectionner un client...",
+  },
+  faq: {
+    title: "Aide & FAQ",
+    sections: [
+      {
+        q: "Comment démarrer ?",
+        a: "Commencez par créer vos articles (produits que vous achetez/vendez) dans la page Articles, puis vos tiers (fournisseurs et clients) dans la page Tiers. Ensuite, enregistrez vos achats pour constituer le stock, puis vos ventes pour les écouler.",
+      },
+      {
+        q: "Que sont les articles et les tiers ?",
+        a: "Les articles sont les produits physiques que vous gérez (ex: 'Boulon M8', unité: 'kg'). Les tiers sont vos partenaires commerciaux : fournisseurs (vous achetez chez eux) et clients (ils achètent chez vous). Un tiers peut être 'les deux'.",
+      },
+      {
+        q: "Comment fonctionnent les achats ?",
+        a: "Un achat crée des lots d'inventaire avec un coût unitaire figé. Choisissez le fournisseur, la date, les conditions (comptant ou à crédit), et ajoutez les lignes (article, quantité, coût unitaire). Un achat à crédit augmente vos dettes fournisseurs.",
+      },
+      {
+        q: "Comment fonctionnent les ventes ?",
+        a: "Une vente consomme automatiquement le stock le plus ancien en premier (FIFO). Le coût des marchandises vendues (COGS) est calculé et figé au moment de la vente. Une vente à crédit augmente vos créances clients. Les prix sont en unités mineures (centimes).",
+      },
+      {
+        q: "Comment fonctionnent les paiements ?",
+        a: "Un paiement enregistre l'argent reçu d'un client. Il peut être affecté à une facture (réduit le solde dû) ou rester comme acompte (crédit disponible pour une future facture). Les montants sont en unités majeures (ex: 50.00 = 50 euros).",
+      },
+      {
+        q: "Que signifient les indicateurs du tableau de bord ?",
+        a: "Valeur du stock : somme de (quantité restante × coût unitaire) pour tous les lots. Créances clients : ce que vos clients vous doivent. Dettes fournisseurs : ce que vous devez. Vérifications d'intégrité : 8 contrôles automatiques vérifient la cohérence de votre comptabilité.",
+      },
+      {
+        q: "Comment changer le thème ou la langue ?",
+        a: "Ouvrez la barre de navigation (bouton ☰ en bas à gauche sur mobile), puis utilisez les boutons en bas : 🌐 pour la langue, ☀️/🌙/✨ pour le thème (Clair, Sombre, Minuit).",
+      },
+      {
+        q: "Mes données sont-elles sécurisées ?",
+        a: "Toutes vos données sont stockées localement sur votre appareil dans une base SQLite. Aucune connexion internet n'est requise. Aucune donnée n'est envoyée à un serveur externe. Vos données vous appartiennent entièrement.",
+      },
+    ],
   },
   common: {
     id: "ID",

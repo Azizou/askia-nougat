@@ -1022,3 +1022,57 @@ td.mono {
     padding: 12px;
   }
 }
+
+.faq-list {
+  max-width: 720px;
+}
+
+.faq-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  overflow: hidden;
+  background: var(--card-bg);
+}
+
+.faq-question {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 14px 16px;
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 0.95rem;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+}
+
+.faq-question:hover {
+  background: var(--bg-hover);
+}
+
+.faq-arrow {
+  font-size: 1.2rem;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+  margin-left: 12px;
+}
+
+.faq-answer {
+  padding: 0 16px 14px;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.faq-item.open {
+  border-color: var(--accent);
+}
+
+.faq-item.open .faq-question {
+  color: var(--accent);
+}

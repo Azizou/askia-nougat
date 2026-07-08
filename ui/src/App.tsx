@@ -5,10 +5,11 @@ import { Parties } from "./pages/Parties";
 import { Purchases } from "./pages/Purchases";
 import { Sales } from "./pages/Sales";
 import { Payments } from "./pages/Payments";
+import { Faq } from "./pages/Faq";
 import { useTheme } from "./theme";
 import { useI18n } from "./i18n";
 
-type Page = "dashboard" | "items" | "parties" | "purchases" | "sales" | "payments";
+type Page = "dashboard" | "items" | "parties" | "purchases" | "sales" | "payments" | "faq";
 
 const NAV_ICONS: Record<Page, string> = {
   dashboard: "📊",
@@ -17,9 +18,10 @@ const NAV_ICONS: Record<Page, string> = {
   purchases: "🛒",
   sales: "💰",
   payments: "💳",
+  faq: "❓",
 };
 
-const NAV_ORDER: Page[] = ["dashboard", "items", "parties", "purchases", "sales", "payments"];
+const NAV_ORDER: Page[] = ["dashboard", "items", "parties", "purchases", "sales", "payments", "faq"];
 
 const SIDEBAR_KEY = "accounting.sidebar.collapsed";
 
@@ -93,6 +95,7 @@ function App() {
         {page === "purchases" && <Purchases />}
         {page === "sales" && <Sales />}
         {page === "payments" && <Payments />}
+        {page === "faq" && <Faq />}
       </main>
 
       {collapsed && (

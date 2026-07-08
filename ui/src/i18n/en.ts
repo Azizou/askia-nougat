@@ -14,6 +14,7 @@ export const en: Translations = {
     purchases: "Purchases",
     sales: "Sales",
     payments: "Payments",
+    faq: "Help",
   },
   dashboard: {
     title: "Dashboard",
@@ -128,6 +129,43 @@ export const en: Translations = {
     added: "Payment recorded.",
     hint: "Records a customer payment as an unallocated prepayment.",
     selectCustomer: "Select customer...",
+  },
+  faq: {
+    title: "Help & FAQ",
+    sections: [
+      {
+        q: "How do I get started?",
+        a: "Start by creating your items (products you buy/sell) on the Items page, then your parties (suppliers and customers) on the Parties page. Next, record purchases to build stock, then sales to sell it.",
+      },
+      {
+        q: "What are items and parties?",
+        a: "Items are the physical products you manage (e.g. 'M8 Bolt', unit: 'kg'). Parties are your business partners: suppliers (you buy from them) and customers (they buy from you). A party can be 'both'.",
+      },
+      {
+        q: "How do purchases work?",
+        a: "A purchase creates inventory lots with a fixed unit cost. Choose the supplier, date, terms (cash or credit), and add lines (item, quantity, unit cost). A credit purchase increases your accounts payable.",
+      },
+      {
+        q: "How do sales work?",
+        a: "A sale automatically consumes the oldest stock first (FIFO). The cost of goods sold (COGS) is calculated and frozen at the time of sale. A credit sale increases your accounts receivable. Prices are in minor units (cents).",
+      },
+      {
+        q: "How do payments work?",
+        a: "A payment records money received from a customer. It can be allocated to an invoice (reduces the amount owed) or remain as a prepayment (credit available for a future invoice). Amounts are in major units (e.g. 50.00 = 50 dollars).",
+      },
+      {
+        q: "What do the dashboard indicators mean?",
+        a: "Inventory Value: sum of (remaining quantity × unit cost) across all lots. Accounts Receivable: what your customers owe you. Accounts Payable: what you owe. Integrity Checks: 8 automatic checks verify your accounting consistency.",
+      },
+      {
+        q: "How do I change the theme or language?",
+        a: "Open the navigation bar (☰ button at the bottom-left on mobile), then use the buttons at the bottom: 🌐 for language, ☀️/🌙/✨ for theme (Light, Dark, Midnight).",
+      },
+      {
+        q: "Is my data secure?",
+        a: "All your data is stored locally on your device in a SQLite database. No internet connection is required. No data is sent to any external server. Your data belongs entirely to you.",
+      },
+    ],
   },
   common: {
     id: "ID",
