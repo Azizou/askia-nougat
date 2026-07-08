@@ -27,3 +27,16 @@ Maintained by the reviewer agent. Each entry records issues found, severity, and
 | 12 | P2 Task 12 | projectors.rs | No issues — nested lotReturns correct, outstanding capped, cash/credit routing sound | — | — | PASS |
 | 13 | P2 Task 13 | projectors.rs | No issues — four-part contract complete, clause 3 no double-count, all target types handled | — | — | PASS |
 | 14 | P2 Task 14 | projectors.rs | No issues — FK-safe delete order, events read before txn, full determinism proven | — | — | PASS |
+| 15 | P3 Task 1 | commands/mod.rs | `reject` unused until Task 3 (expected) | Minor | — | PASS |
+| 16 | P3 Task 2 | categories.rs | No issues — categories match spec §4.5, clean dispatch table | — | — | PASS |
+| 17 | P3 Tasks 3-4 | guards.rs, setup.rs | No issues — value guards reusable, setup handlers enforce uniqueness/immutability | — | — | PASS |
+| 18 | P3 Task 5 | guards.rs | No issues — LotDemand aggregation correct, oversell/lot-item-match sound | — | — | PASS |
+| 19 | P3 Task 6 | purchase.rs | No issues — deterministic lotId, party kind check, guards-before-write | — | — | PASS |
+| 20 | P3 Task 7 | sale.rs | No issues — FIFO selection, LotDemand aggregation, COGS freeze, override validation | — | — | PASS |
+| 21 | P3 Task 8 | purchase.rs, guards.rs | No issues — flat shape, LotDemand.take for consuming, return-against-reversed guard | — | — | PASS |
+| 22 | P3 Task 9 | sale.rs, guards.rs | No issues — nested lotReturns, dual-clause over-restore, LotDemand.restore, no frozen totals | — | — | PASS |
+| 23 | P3 Tasks 10-11 | guards.rs | No issues — aggregated over-allocation, credit-overdraw per direction, party-ownership sound | — | — | PASS |
+| 24 | P3 Task 12 | payment.rs | No issues — all 3 handlers correct, guards wired, credit-overdraw bounds PaymentAllocated | — | — | PASS |
+| 25 | P3 Task 13 | movement.rs, guards.rs | No issues — credit-expense party guard enforced, self-transfer, write-down-only, found lotId deterministic | — | — | PASS |
+| 26 | P3 Task 14 | guards.rs | No issues — all 5 reversal edges correct, no cascade, edge 3/5 sound | — | — | PASS |
+| 27 | P3 Task 15 | reversal.rs | No issues — guard orchestration by category, frozen accountId lines, clause 1 only | — | — | PASS |
