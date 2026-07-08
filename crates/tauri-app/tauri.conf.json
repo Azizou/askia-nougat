@@ -2,12 +2,12 @@
   "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-cli/schema.json",
   "productName": "Accounting",
   "version": "0.1.0",
-  "identifier": "com.accounting.app",
+  "identifier": "com.accounting.desktop",
   "build": {
     "frontendDist": "../../ui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev --prefix ../../ui",
-    "beforeBuildCommand": "npm run build --prefix ../../ui"
+    "beforeDevCommand": "",
+    "beforeBuildCommand": ""
   },
   "app": {
     "windows": [

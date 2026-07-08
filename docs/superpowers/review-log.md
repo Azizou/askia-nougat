@@ -43,3 +43,5 @@ Maintained by the reviewer agent. Each entry records issues found, severity, and
 | 28 | P4 Task 1 | test_support.rs, reconciliation.rs | No issues — fixture drives real handlers, check #1 correct | — | — | PASS |
 | 29 | P4 Tasks 2-8 | reconciliation.rs | No issues — all 7 checks correct, net form, terms-aware, null-safe | — | — | PASS |
 | 30 | P4 Tasks 9-11 | reconciliation.rs, queries.rs | No issues — aggregator, units_sold, gross/net profit, IS NOT null-safe | — | — | PASS |
+| 31 | Tauri IPC | tauri-app/ | No issues — single Mutex, correct invoke patterns, genesis-on-first-open safe | — | — | PASS |
+| 32 | Full UI | ui/src/ | No issues — money conversion correct, forms functional, error handling present | — | — | PASS |
