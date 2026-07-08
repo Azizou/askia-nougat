@@ -54,6 +54,10 @@ fn main() {
             commands::get_dashboard,
             commands::get_stock,
             commands::get_profit,
+            commands::list_items,
+            commands::list_parties,
+            commands::list_sales,
+            commands::list_purchases,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

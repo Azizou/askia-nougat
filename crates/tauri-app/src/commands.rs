@@ -200,3 +200,82 @@ pub fn get_profit(state: State<AppState>, anchor: String) -> Result<ProfitData, 
         net_profit_minor: net,
     })
 }
+
+#[derive(Serialize)]
+pub struct ItemRow {
+    pub id: String,
+    pub name: String,
+    pub sku: String,
+    pub unit: String,
+}
+
+#[tauri::command]
+pub fn list_items(state: State<AppState>) -> Result<Vec<ItemRow>, AppError> {
+    let db = state.db.lock().unwrap();
+    let mut stmt = db.conn.prepare(
+        "SELECT id, name, sku, unit FROM items ORDER BY name")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ItemRow { id: r.get(0)?, name: r.get(1)?, sku: r.get(2)?, unit: r.get(3)? })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+#[derive(Serialize)]
+pub struct PartyRow {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+}
+
+#[tauri::command]
+pub fn list_parties(state: State<AppState>) -> Result<Vec<PartyRow>, AppError> {
+    let db = state.db.lock().unwrap();
+    let mut stmt = db.conn.prepare(
+        "SELECT id, name, kind FROM parties ORDER BY name")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(PartyRow { id: r.get(0)?, name: r.get(1)?, kind: r.get(2)? })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+#[derive(Serialize)]
+pub struct SaleRow {
+    pub id: String,
+    pub customer_id: Option<String>,
+    pub date: String,
+    pub terms: String,
+    pub total_minor: i64,
+    pub outstanding_minor: i64,
+}
+
+#[tauri::command]
+pub fn list_sales(state: State<AppState>) -> Result<Vec<SaleRow>, AppError> {
+    let db = state.db.lock().unwrap();
+    let mut stmt = db.conn.prepare(
+        "SELECT id, customer_id, date, terms, total_minor, outstanding_minor FROM sales WHERE reversed = 0 ORDER BY date DESC")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(SaleRow { id: r.get(0)?, customer_id: r.get(1)?, date: r.get(2)?, terms: r.get(3)?, total_minor: r.get(4)?, outstanding_minor: r.get(5)? })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+#[derive(Serialize)]
+pub struct PurchaseRow {
+    pub id: String,
+    pub supplier_id: Option<String>,
+    pub date: String,
+    pub terms: String,
+    pub total_minor: i64,
+    pub outstanding_minor: i64,
+}
+
+#[tauri::command]
+pub fn list_purchases(state: State<AppState>) -> Result<Vec<PurchaseRow>, AppError> {
+    let db = state.db.lock().unwrap();
+    let mut stmt = db.conn.prepare(
+        "SELECT id, supplier_id, date, terms, total_minor, outstanding_minor FROM purchases WHERE reversed = 0 ORDER BY date DESC")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(PurchaseRow { id: r.get(0)?, supplier_id: r.get(1)?, date: r.get(2)?, terms: r.get(3)?, total_minor: r.get(4)?, outstanding_minor: r.get(5)? })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}

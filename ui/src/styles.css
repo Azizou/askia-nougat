@@ -4,13 +4,68 @@
   background-color: #fafafa;
 }
 
+* { box-sizing: border-box; }
+
 body {
   margin: 0;
-  padding: 24px;
+  padding: 0;
 }
 
 h1 { font-size: 1.5rem; margin: 0 0 16px; }
 h2 { font-size: 1.1rem; margin: 16px 0 8px; color: #444; }
+
+.layout {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  background: #1f2933;
+  color: #e4e7eb;
+  padding: 20px 0;
+}
+
+.sidebar .brand {
+  font-size: 1.1rem;
+  font-weight: 700;
+  padding: 0 20px 20px;
+  border-bottom: 1px solid #323f4b;
+  margin-bottom: 12px;
+}
+
+.sidebar ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.sidebar li { margin: 0; }
+
+.sidebar button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 10px 20px;
+  background: transparent;
+  color: inherit;
+  border: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.sidebar button:hover { background: #323f4b; }
+.sidebar button.active {
+  background: #3e4c59;
+  color: white;
+  border-left: 3px solid #4fd1c5;
+  padding-left: 17px;
+}
+
+.content {
+  padding: 24px 32px;
+  overflow-x: auto;
+}
 
 .dashboard {
   display: grid;
@@ -31,9 +86,140 @@ h2 { font-size: 1.1rem; margin: 16px 0 8px; color: #444; }
 .card .value.ok { color: #2e7d32; }
 .card .value.warn { color: #e65100; }
 
-table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid #eee; }
-th { font-size: 0.75rem; text-transform: uppercase; color: #666; }
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+  background: white;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #e0e0e0;
+}
+th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #eee; }
+th { font-size: 0.75rem; text-transform: uppercase; color: #666; background: #f7f7f7; }
+tr:last-child td { border-bottom: none; }
+
+.panel {
+  background: white;
+  border: 1px solid #e0e0e0;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 24px;
+}
+.panel h2 { margin-top: 0; }
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-width: 640px;
+}
+
+.form label {
+  display: flex;
+  flex-direction: column;
+  font-size: 0.85rem;
+  color: #444;
+  gap: 4px;
+}
+
+.form input,
+.form select {
+  padding: 8px 10px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  background: white;
+}
+
+.form input:focus,
+.form select:focus {
+  outline: none;
+  border-color: #4fd1c5;
+  box-shadow: 0 0 0 2px rgba(79, 209, 197, 0.2);
+}
+
+.form button,
+button {
+  padding: 8px 16px;
+  border: 1px solid #1f2933;
+  background: #1f2933;
+  color: white;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.form button:hover:not(:disabled),
+button:hover:not(:disabled) { background: #3e4c59; }
+.form button:disabled,
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.lines {
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  padding: 12px;
+  background: #fafafa;
+}
+
+.lines-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.lines-header button {
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  background: white;
+  color: #1f2933;
+  border: 1px solid #ccc;
+}
+
+.line {
+  display: grid;
+  grid-template-columns: 2fr 1fr 1fr auto;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.line select,
+.line input {
+  padding: 6px 8px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
+
+.line button {
+  padding: 4px 10px;
+  font-size: 0.8rem;
+  background: white;
+  color: #c62828;
+  border: 1px solid #ccc;
+}
+
+.error {
+  color: #c62828;
+  background: #fdecea;
+  border: 1px solid #f5c2c0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin: 8px 0;
+}
+
+.ok {
+  color: #2e7d32;
+  background: #e8f5e9;
+  border: 1px solid #c8e6c9;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin: 8px 0;
+}
+
+.muted { color: #888; font-size: 0.9rem; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem; color: #666; }
 
 .status-ok { color: #2e7d32; font-weight: 600; }
 .status-fail { color: #c62828; font-weight: 600; }

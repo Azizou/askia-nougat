@@ -1,120 +1,50 @@
-import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { useState } from "react";
+import { Dashboard } from "./pages/Dashboard";
+import { Items } from "./pages/Items";
+import { Parties } from "./pages/Parties";
+import { Purchases } from "./pages/Purchases";
+import { Sales } from "./pages/Sales";
+import { Payments } from "./pages/Payments";
 
-interface DashboardData {
-  inventory_value: number;
-  total_receivable: number;
-  total_payable: number;
-  checks_passing: boolean;
-}
+type Page = "dashboard" | "items" | "parties" | "purchases" | "sales" | "payments";
 
-interface StockRow {
-  item_id: string;
-  qty: number;
-}
-
-interface ProfitData {
-  revenue_minor: number;
-  cogs_minor: number;
-  gross_profit_minor: number;
-  net_profit_minor: number;
-}
-
-function formatMoney(minor: number): string {
-  return (minor / 100).toLocaleString(undefined, { minimumFractionDigits: 2 });
-}
+const NAV: { key: Page; label: string }[] = [
+  { key: "dashboard", label: "Dashboard" },
+  { key: "items", label: "Items" },
+  { key: "parties", label: "Parties" },
+  { key: "purchases", label: "Purchases" },
+  { key: "sales", label: "Sales" },
+  { key: "payments", label: "Payments" },
+];
 
 function App() {
-  const [dashboard, setDashboard] = useState<DashboardData | null>(null);
-  const [stock, setStock] = useState<StockRow[]>([]);
-  const [profit, setProfit] = useState<ProfitData | null>(null);
-  const [error, setError] = useState<string>("");
-
-  const refresh = async () => {
-    try {
-      const [d, s, p] = await Promise.all([
-        invoke<DashboardData>("get_dashboard"),
-        invoke<StockRow[]>("get_stock"),
-        invoke<ProfitData>("get_profit", { anchor: new Date().toISOString().slice(0, 10) }),
-      ]);
-      setDashboard(d);
-      setStock(s);
-      setProfit(p);
-      setError("");
-    } catch (e: unknown) {
-      setError(String(e));
-    }
-  };
-
-  useEffect(() => { refresh(); }, []);
+  const [page, setPage] = useState<Page>("dashboard");
 
   return (
-    <div>
-      <h1>Accounting Dashboard</h1>
-      {error && <p style={{ color: "red" }}>{error}</p>}
-
-      {dashboard && (
-        <div className="dashboard">
-          <div className="card">
-            <div className="label">Inventory Value</div>
-            <div className="value">{formatMoney(dashboard.inventory_value)}</div>
-          </div>
-          <div className="card">
-            <div className="label">Accounts Receivable</div>
-            <div className="value">{formatMoney(dashboard.total_receivable)}</div>
-          </div>
-          <div className="card">
-            <div className="label">Accounts Payable</div>
-            <div className="value">{formatMoney(dashboard.total_payable)}</div>
-          </div>
-          <div className="card">
-            <div className="label">Integrity Checks</div>
-            <div className={`value ${dashboard.checks_passing ? "ok" : "warn"}`}>
-              {dashboard.checks_passing ? "All Passing" : "FAILED"}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {profit && (
-        <>
-          <h2>Profit (Last 6 Months)</h2>
-          <div className="dashboard">
-            <div className="card">
-              <div className="label">Revenue</div>
-              <div className="value">{formatMoney(profit.revenue_minor)}</div>
-            </div>
-            <div className="card">
-              <div className="label">COGS</div>
-              <div className="value">{formatMoney(profit.cogs_minor)}</div>
-            </div>
-            <div className="card">
-              <div className="label">Gross Profit</div>
-              <div className="value ok">{formatMoney(profit.gross_profit_minor)}</div>
-            </div>
-            <div className="card">
-              <div className="label">Net Profit</div>
-              <div className="value ok">{formatMoney(profit.net_profit_minor)}</div>
-            </div>
-          </div>
-        </>
-      )}
-
-      {stock.length > 0 && (
-        <>
-          <h2>Stock on Hand</h2>
-          <table>
-            <thead>
-              <tr><th>Item</th><th>Qty</th></tr>
-            </thead>
-            <tbody>
-              {stock.map((s) => (
-                <tr key={s.item_id}><td>{s.item_id}</td><td>{s.qty}</td></tr>
-              ))}
-            </tbody>
-          </table>
-        </>
-      )}
+    <div className="layout">
+      <nav className="sidebar">
+        <div className="brand">Accounting</div>
+        <ul>
+          {NAV.map((n) => (
+            <li key={n.key}>
+              <button
+                className={page === n.key ? "active" : ""}
+                onClick={() => setPage(n.key)}
+              >
+                {n.label}
+              </button>
+            </li>
+          ))}
+        </ul>
+      </nav>
+      <main className="content">
+        {page === "dashboard" && <Dashboard />}
+        {page === "items" && <Items />}
+        {page === "parties" && <Parties />}
+        {page === "purchases" && <Purchases />}
+        {page === "sales" && <Sales />}
+        {page === "payments" && <Payments />}
+      </main>
     </div>
   );
 }
