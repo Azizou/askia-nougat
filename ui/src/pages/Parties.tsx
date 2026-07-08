@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { newId } from "../lib";
 import { useToast } from "../theme";
+import { useI18n } from "../i18n";
 
 type PartyKind = "supplier" | "customer" | "both";
 
@@ -12,6 +13,7 @@ interface Party {
 }
 
 export function Parties() {
+  const { t } = useI18n();
   const [parties, setParties] = useState<Party[]>([]);
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
@@ -56,7 +58,7 @@ export function Parties() {
       setName("");
       setKind("supplier");
       setOpen(false);
-      toast.push(`Party "${name}" added.`);
+      toast.push(t.parties.added);
       await refresh();
     } catch (e: unknown) {
       setError(String(e));
@@ -72,23 +74,29 @@ export function Parties() {
     return "";
   };
 
+  const kindLabel = (k: PartyKind) => {
+    if (k === "customer") return t.parties.customer;
+    if (k === "supplier") return t.parties.supplier;
+    return t.parties.both;
+  };
+
   return (
     <div>
       <div className="page-header">
-        <h1>Parties</h1>
-        <span className="shortcut-hint">Press Ctrl+N to add new</span>
+        <h1>{t.parties.title}</h1>
+        <span className="shortcut-hint">{t.common.shortcutHint}</span>
       </div>
 
       <section className="panel">
         <div className="panel-header" onClick={() => setOpen((o) => !o)}>
-          <h2>{open ? "New Party" : `${parties.length} Parties`}</h2>
+          <h2>{open ? t.parties.addNew : `${parties.length} ${t.parties.countSuffix}`}</h2>
           <button
             className="add-btn icon-only"
             onClick={(e) => {
               e.stopPropagation();
               setOpen((o) => !o);
             }}
-            title={open ? "Close" : "Add party"}
+            title={open ? t.parties.close : t.parties.addTooltip}
           >
             {open ? "×" : "+"}
           </button>
@@ -97,7 +105,7 @@ export function Parties() {
           <form onSubmit={submit} className="form">
             <div className="form-row">
               <label>
-                Name
+                {t.parties.name}
                 <input
                   ref={nameInput}
                   value={name}
@@ -106,14 +114,14 @@ export function Parties() {
                 />
               </label>
               <label>
-                Kind
+                {t.parties.kind}
                 <select
                   value={kind}
                   onChange={(e) => setKind(e.target.value as PartyKind)}
                 >
-                  <option value="supplier">Supplier</option>
-                  <option value="customer">Customer</option>
-                  <option value="both">Both</option>
+                  <option value="supplier">{t.parties.supplier}</option>
+                  <option value="customer">{t.parties.customer}</option>
+                  <option value="both">{t.parties.both}</option>
                 </select>
               </label>
             </div>
@@ -124,10 +132,10 @@ export function Parties() {
                 onClick={() => setOpen(false)}
                 disabled={submitting}
               >
-                Cancel
+                {t.common.cancel}
               </button>
               <button type="submit" className="primary" disabled={submitting}>
-                {submitting ? "Adding..." : "Add Party"}
+                {submitting ? t.common.adding : t.parties.add}
               </button>
             </div>
             {error && <p className="error">{error}</p>}
@@ -137,16 +145,16 @@ export function Parties() {
 
       {parties.length === 0 ? (
         <div className="table-wrap">
-          <div className="empty">No parties yet. Click + to add one.</div>
+          <div className="empty">{t.parties.empty}</div>
         </div>
       ) : (
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Kind</th>
-                <th>ID</th>
+                <th>{t.parties.name}</th>
+                <th>{t.parties.kind}</th>
+                <th>{t.common.id}</th>
               </tr>
             </thead>
             <tbody>
@@ -154,7 +162,7 @@ export function Parties() {
                 <tr key={p.id}>
                   <td>{p.name}</td>
                   <td>
-                    <span className={`badge ${kindClass(p.kind)}`}>{p.kind}</span>
+                    <span className={`badge ${kindClass(p.kind)}`}>{kindLabel(p.kind)}</span>
                   </td>
                   <td className="mono">{p.id.slice(0, 8)}...</td>
                 </tr>

@@ -200,6 +200,25 @@ h3 {
   border-color: var(--border-strong);
 }
 
+.locale-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 6px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.locale-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
 /* ==== Sidebar ==== */
 
 .sidebar {

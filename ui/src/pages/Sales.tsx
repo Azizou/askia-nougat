@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { formatMoney, majorToMinor, newId, today } from "../lib";
 import { useToast } from "../theme";
+import { useI18n } from "../i18n";
 
 type Terms = "cash" | "credit";
 
@@ -36,6 +37,7 @@ interface LineDraft {
 const emptyLine = (): LineDraft => ({ item_id: "", qty: "", unit_price_major: "" });
 
 export function Sales() {
+  const { t } = useI18n();
   const [sales, setSales] = useState<Sale[]>([]);
   const [parties, setParties] = useState<Party[]>([]);
   const [items, setItems] = useState<Item[]>([]);
@@ -112,7 +114,7 @@ export function Sales() {
       setTerms("credit");
       setLines([emptyLine()]);
       setOpen(false);
-      toast.push("Sale recorded.");
+      toast.push(t.sales.added);
       await refresh();
     } catch (e: unknown) {
       setError(String(e));
@@ -123,24 +125,25 @@ export function Sales() {
   };
 
   const customerName = (id: string) => parties.find((p) => p.id === id)?.name ?? id;
+  const termsLabel = (val: Terms) => (val === "cash" ? t.sales.cash : t.sales.credit);
 
   return (
     <div>
       <div className="page-header">
-        <h1>Sales</h1>
-        <span className="shortcut-hint">Press Ctrl+N to add new</span>
+        <h1>{t.sales.title}</h1>
+        <span className="shortcut-hint">{t.common.shortcutHint}</span>
       </div>
 
       <section className="panel">
         <div className="panel-header" onClick={() => setOpen((o) => !o)}>
-          <h2>{open ? "Record Sale" : `${sales.length} Sales`}</h2>
+          <h2>{open ? t.sales.addNew : `${sales.length} ${t.sales.countSuffix}`}</h2>
           <button
             className="add-btn icon-only"
             onClick={(e) => {
               e.stopPropagation();
               setOpen((o) => !o);
             }}
-            title={open ? "Close" : "Record sale"}
+            title={open ? t.sales.close : t.sales.addTooltip}
           >
             {open ? "×" : "+"}
           </button>
@@ -149,13 +152,13 @@ export function Sales() {
           <form onSubmit={submit} className="form">
             <div className="form-row">
               <label>
-                Customer
+                {t.sales.customer}
                 <select
                   value={customerId}
                   onChange={(e) => setCustomerId(e.target.value)}
                   required
                 >
-                  <option value="">Select customer...</option>
+                  <option value="">{t.sales.selectCustomer}</option>
                   {customers.map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.name}
@@ -164,7 +167,7 @@ export function Sales() {
                 </select>
               </label>
               <label>
-                Date
+                {t.sales.date}
                 <input
                   type="date"
                   value={date}
@@ -173,22 +176,22 @@ export function Sales() {
                 />
               </label>
               <label>
-                Terms
+                {t.sales.terms}
                 <select
                   value={terms}
                   onChange={(e) => setTerms(e.target.value as Terms)}
                 >
-                  <option value="cash">Cash</option>
-                  <option value="credit">Credit</option>
+                  <option value="cash">{t.sales.cash}</option>
+                  <option value="credit">{t.sales.credit}</option>
                 </select>
               </label>
             </div>
 
             <div className="lines">
               <div className="lines-header">
-                <strong>Lines</strong>
+                <strong>{t.sales.lines}</strong>
                 <button type="button" className="secondary" onClick={addLine}>
-                  + Add Line
+                  {t.sales.addLine}
                 </button>
               </div>
               {lines.map((line, idx) => (
@@ -198,7 +201,7 @@ export function Sales() {
                     onChange={(e) => updateLine(idx, { item_id: e.target.value })}
                     required
                   >
-                    <option value="">Item...</option>
+                    <option value="">{t.sales.selectItem}</option>
                     {items.map((it) => (
                       <option key={it.id} value={it.id}>
                         {it.name} ({it.sku})
@@ -208,7 +211,7 @@ export function Sales() {
                   <input
                     type="number"
                     step="any"
-                    placeholder="Qty"
+                    placeholder={t.sales.qty}
                     value={line.qty}
                     onChange={(e) => updateLine(idx, { qty: e.target.value })}
                     required
@@ -216,7 +219,7 @@ export function Sales() {
                   <input
                     type="number"
                     step="0.01"
-                    placeholder="Unit price"
+                    placeholder={t.sales.unitPrice}
                     value={line.unit_price_major}
                     onChange={(e) =>
                       updateLine(idx, { unit_price_major: e.target.value })
@@ -229,7 +232,7 @@ export function Sales() {
                     onClick={() => removeLine(idx)}
                     disabled={lines.length === 1}
                   >
-                    Remove
+                    {t.sales.removeLine}
                   </button>
                 </div>
               ))}
@@ -242,10 +245,10 @@ export function Sales() {
                 onClick={() => setOpen(false)}
                 disabled={submitting}
               >
-                Cancel
+                {t.common.cancel}
               </button>
               <button type="submit" className="primary" disabled={submitting}>
-                {submitting ? "Recording..." : "Record Sale"}
+                {submitting ? t.common.recording : t.sales.submit}
               </button>
             </div>
             {error && <p className="error">{error}</p>}
@@ -255,18 +258,18 @@ export function Sales() {
 
       {sales.length === 0 ? (
         <div className="table-wrap">
-          <div className="empty">No sales yet. Click + to record one.</div>
+          <div className="empty">{t.sales.empty}</div>
         </div>
       ) : (
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Date</th>
-                <th>Customer</th>
-                <th>Terms</th>
-                <th className="num">Total</th>
-                <th className="num">Outstanding</th>
+                <th>{t.sales.date}</th>
+                <th>{t.sales.customer}</th>
+                <th>{t.sales.terms}</th>
+                <th className="num">{t.sales.total}</th>
+                <th className="num">{t.sales.outstanding}</th>
               </tr>
             </thead>
             <tbody>
@@ -276,7 +279,7 @@ export function Sales() {
                   <td>{customerName(s.customer_id)}</td>
                   <td>
                     <span className={`badge ${s.terms === "cash" ? "success" : ""}`}>
-                      {s.terms}
+                      {termsLabel(s.terms)}
                     </span>
                   </td>
                   <td className="num">{formatMoney(s.total_minor)}</td>

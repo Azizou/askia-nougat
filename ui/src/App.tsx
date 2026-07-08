@@ -6,17 +6,20 @@ import { Purchases } from "./pages/Purchases";
 import { Sales } from "./pages/Sales";
 import { Payments } from "./pages/Payments";
 import { useTheme } from "./theme";
+import { useI18n } from "./i18n";
 
 type Page = "dashboard" | "items" | "parties" | "purchases" | "sales" | "payments";
 
-const NAV: { key: Page; label: string; icon: string }[] = [
-  { key: "dashboard", label: "Dashboard", icon: "📊" },
-  { key: "items", label: "Items", icon: "📦" },
-  { key: "parties", label: "Parties", icon: "👥" },
-  { key: "purchases", label: "Purchases", icon: "🛒" },
-  { key: "sales", label: "Sales", icon: "💰" },
-  { key: "payments", label: "Payments", icon: "💳" },
-];
+const NAV_ICONS: Record<Page, string> = {
+  dashboard: "📊",
+  items: "📦",
+  parties: "👥",
+  purchases: "🛒",
+  sales: "💰",
+  payments: "💳",
+};
+
+const NAV_ORDER: Page[] = ["dashboard", "items", "parties", "purchases", "sales", "payments"];
 
 const SIDEBAR_KEY = "accounting.sidebar.collapsed";
 
@@ -26,6 +29,7 @@ function App() {
     return window.localStorage.getItem(SIDEBAR_KEY) === "1";
   });
   const { theme, label, icon, cycle } = useTheme();
+  const { t, localeLabel, cycleLocale } = useI18n();
 
   useEffect(() => {
     window.localStorage.setItem(SIDEBAR_KEY, collapsed ? "1" : "0");
@@ -38,15 +42,24 @@ function App() {
           <button
             className="icon-btn"
             onClick={() => setCollapsed((c) => !c)}
-            aria-label="Toggle sidebar"
-            title="Toggle sidebar"
+            aria-label={t.app.toggleSidebar}
+            title={t.app.toggleSidebar}
           >
             ☰
           </button>
-          <span className="header-brand">Accounting</span>
+          <span className="header-brand">{t.app.name}</span>
         </div>
         <div className="header-right">
-          <button className="theme-btn" onClick={cycle} title="Cycle theme">
+          <button
+            className="locale-btn"
+            onClick={cycleLocale}
+            title={t.app.switchLocale}
+            aria-label={t.app.switchLocale}
+          >
+            <span>🌐</span>
+            <span>{localeLabel}</span>
+          </button>
+          <button className="theme-btn" onClick={cycle} title={t.app.cycleTheme}>
             <span>{icon}</span>
             <span>{label}</span>
           </button>
@@ -55,15 +68,15 @@ function App() {
 
       <nav className={`sidebar${collapsed ? " collapsed" : ""}`}>
         <ul className="sidebar-nav">
-          {NAV.map((n) => (
-            <li key={n.key}>
+          {NAV_ORDER.map((key) => (
+            <li key={key}>
               <button
-                className={`nav-item${page === n.key ? " active" : ""}`}
-                onClick={() => setPage(n.key)}
-                data-tooltip={n.label}
+                className={`nav-item${page === key ? " active" : ""}`}
+                onClick={() => setPage(key)}
+                data-tooltip={t.nav[key]}
               >
-                <span className="nav-icon">{n.icon}</span>
-                <span className="nav-label">{n.label}</span>
+                <span className="nav-icon">{NAV_ICONS[key]}</span>
+                <span className="nav-label">{t.nav[key]}</span>
               </button>
             </li>
           ))}

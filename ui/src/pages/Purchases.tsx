@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { formatMoney, majorToMinor, newId, today } from "../lib";
 import { useToast } from "../theme";
+import { useI18n } from "../i18n";
 
 type Terms = "cash" | "credit";
 
@@ -36,6 +37,7 @@ interface LineDraft {
 const emptyLine = (): LineDraft => ({ item_id: "", qty: "", unit_cost_major: "" });
 
 export function Purchases() {
+  const { t } = useI18n();
   const [purchases, setPurchases] = useState<Purchase[]>([]);
   const [parties, setParties] = useState<Party[]>([]);
   const [items, setItems] = useState<Item[]>([]);
@@ -112,7 +114,7 @@ export function Purchases() {
       setTerms("credit");
       setLines([emptyLine()]);
       setOpen(false);
-      toast.push("Purchase recorded.");
+      toast.push(t.purchases.added);
       await refresh();
     } catch (e: unknown) {
       setError(String(e));
@@ -123,24 +125,27 @@ export function Purchases() {
   };
 
   const supplierName = (id: string) => parties.find((p) => p.id === id)?.name ?? id;
+  const termsLabel = (val: Terms) => (val === "cash" ? t.purchases.cash : t.purchases.credit);
 
   return (
     <div>
       <div className="page-header">
-        <h1>Purchases</h1>
-        <span className="shortcut-hint">Press Ctrl+N to add new</span>
+        <h1>{t.purchases.title}</h1>
+        <span className="shortcut-hint">{t.common.shortcutHint}</span>
       </div>
 
       <section className="panel">
         <div className="panel-header" onClick={() => setOpen((o) => !o)}>
-          <h2>{open ? "Record Purchase" : `${purchases.length} Purchases`}</h2>
+          <h2>
+            {open ? t.purchases.addNew : `${purchases.length} ${t.purchases.countSuffix}`}
+          </h2>
           <button
             className="add-btn icon-only"
             onClick={(e) => {
               e.stopPropagation();
               setOpen((o) => !o);
             }}
-            title={open ? "Close" : "Record purchase"}
+            title={open ? t.purchases.close : t.purchases.addTooltip}
           >
             {open ? "×" : "+"}
           </button>
@@ -149,13 +154,13 @@ export function Purchases() {
           <form onSubmit={submit} className="form">
             <div className="form-row">
               <label>
-                Supplier
+                {t.purchases.supplier}
                 <select
                   value={supplierId}
                   onChange={(e) => setSupplierId(e.target.value)}
                   required
                 >
-                  <option value="">Select supplier...</option>
+                  <option value="">{t.purchases.selectSupplier}</option>
                   {suppliers.map((p) => (
                     <option key={p.id} value={p.id}>
                       {p.name}
@@ -164,7 +169,7 @@ export function Purchases() {
                 </select>
               </label>
               <label>
-                Date
+                {t.purchases.date}
                 <input
                   type="date"
                   value={date}
@@ -173,22 +178,22 @@ export function Purchases() {
                 />
               </label>
               <label>
-                Terms
+                {t.purchases.terms}
                 <select
                   value={terms}
                   onChange={(e) => setTerms(e.target.value as Terms)}
                 >
-                  <option value="cash">Cash</option>
-                  <option value="credit">Credit</option>
+                  <option value="cash">{t.purchases.cash}</option>
+                  <option value="credit">{t.purchases.credit}</option>
                 </select>
               </label>
             </div>
 
             <div className="lines">
               <div className="lines-header">
-                <strong>Lines</strong>
+                <strong>{t.purchases.lines}</strong>
                 <button type="button" className="secondary" onClick={addLine}>
-                  + Add Line
+                  {t.purchases.addLine}
                 </button>
               </div>
               {lines.map((line, idx) => (
@@ -198,7 +203,7 @@ export function Purchases() {
                     onChange={(e) => updateLine(idx, { item_id: e.target.value })}
                     required
                   >
-                    <option value="">Item...</option>
+                    <option value="">{t.purchases.selectItem}</option>
                     {items.map((it) => (
                       <option key={it.id} value={it.id}>
                         {it.name} ({it.sku})
@@ -208,7 +213,7 @@ export function Purchases() {
                   <input
                     type="number"
                     step="any"
-                    placeholder="Qty"
+                    placeholder={t.purchases.qty}
                     value={line.qty}
                     onChange={(e) => updateLine(idx, { qty: e.target.value })}
                     required
@@ -216,7 +221,7 @@ export function Purchases() {
                   <input
                     type="number"
                     step="0.01"
-                    placeholder="Unit cost"
+                    placeholder={t.purchases.unitCost}
                     value={line.unit_cost_major}
                     onChange={(e) =>
                       updateLine(idx, { unit_cost_major: e.target.value })
@@ -229,7 +234,7 @@ export function Purchases() {
                     onClick={() => removeLine(idx)}
                     disabled={lines.length === 1}
                   >
-                    Remove
+                    {t.purchases.removeLine}
                   </button>
                 </div>
               ))}
@@ -242,10 +247,10 @@ export function Purchases() {
                 onClick={() => setOpen(false)}
                 disabled={submitting}
               >
-                Cancel
+                {t.common.cancel}
               </button>
               <button type="submit" className="primary" disabled={submitting}>
-                {submitting ? "Recording..." : "Record Purchase"}
+                {submitting ? t.common.recording : t.purchases.submit}
               </button>
             </div>
             {error && <p className="error">{error}</p>}
@@ -255,18 +260,18 @@ export function Purchases() {
 
       {purchases.length === 0 ? (
         <div className="table-wrap">
-          <div className="empty">No purchases yet. Click + to record one.</div>
+          <div className="empty">{t.purchases.empty}</div>
         </div>
       ) : (
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Date</th>
-                <th>Supplier</th>
-                <th>Terms</th>
-                <th className="num">Total</th>
-                <th className="num">Outstanding</th>
+                <th>{t.purchases.date}</th>
+                <th>{t.purchases.supplier}</th>
+                <th>{t.purchases.terms}</th>
+                <th className="num">{t.purchases.total}</th>
+                <th className="num">{t.purchases.outstanding}</th>
               </tr>
             </thead>
             <tbody>
@@ -276,7 +281,7 @@ export function Purchases() {
                   <td>{supplierName(p.supplier_id)}</td>
                   <td>
                     <span className={`badge ${p.terms === "cash" ? "success" : ""}`}>
-                      {p.terms}
+                      {termsLabel(p.terms)}
                     </span>
                   </td>
                   <td className="num">{formatMoney(p.total_minor)}</td>

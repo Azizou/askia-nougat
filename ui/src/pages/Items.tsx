@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { newId } from "../lib";
 import { useToast } from "../theme";
+import { useI18n } from "../i18n";
 
 interface Item {
   id: string;
@@ -11,6 +12,7 @@ interface Item {
 }
 
 export function Items() {
+  const { t } = useI18n();
   const [items, setItems] = useState<Item[]>([]);
   const [open, setOpen] = useState(false);
   const [sku, setSku] = useState("");
@@ -57,7 +59,7 @@ export function Items() {
       setName("");
       setUnit("ea");
       setOpen(false);
-      toast.push(`Item "${name}" added.`);
+      toast.push(t.items.added);
       await refresh();
     } catch (e: unknown) {
       setError(String(e));
@@ -70,20 +72,20 @@ export function Items() {
   return (
     <div>
       <div className="page-header">
-        <h1>Items</h1>
-        <span className="shortcut-hint">Press Ctrl+N to add new</span>
+        <h1>{t.items.title}</h1>
+        <span className="shortcut-hint">{t.common.shortcutHint}</span>
       </div>
 
       <section className="panel">
         <div className="panel-header" onClick={() => setOpen((o) => !o)}>
-          <h2>{open ? "New Item" : `${items.length} Items`}</h2>
+          <h2>{open ? t.items.addNew : `${items.length} ${t.items.countSuffix}`}</h2>
           <button
             className="add-btn icon-only"
             onClick={(e) => {
               e.stopPropagation();
               setOpen((o) => !o);
             }}
-            title={open ? "Close" : "Add item"}
+            title={open ? t.items.close : t.items.addTooltip}
           >
             {open ? "×" : "+"}
           </button>
@@ -92,7 +94,7 @@ export function Items() {
           <form onSubmit={submit} className="form">
             <div className="form-row">
               <label>
-                SKU
+                {t.items.sku}
                 <input
                   ref={skuInput}
                   value={sku}
@@ -101,11 +103,11 @@ export function Items() {
                 />
               </label>
               <label>
-                Name
+                {t.items.name}
                 <input value={name} onChange={(e) => setName(e.target.value)} required />
               </label>
               <label>
-                Unit
+                {t.items.unit}
                 <input value={unit} onChange={(e) => setUnit(e.target.value)} required />
               </label>
             </div>
@@ -116,10 +118,10 @@ export function Items() {
                 onClick={() => setOpen(false)}
                 disabled={submitting}
               >
-                Cancel
+                {t.common.cancel}
               </button>
               <button type="submit" className="primary" disabled={submitting}>
-                {submitting ? "Adding..." : "Add Item"}
+                {submitting ? t.common.adding : t.items.add}
               </button>
             </div>
             {error && <p className="error">{error}</p>}
@@ -129,17 +131,17 @@ export function Items() {
 
       {items.length === 0 ? (
         <div className="table-wrap">
-          <div className="empty">No items yet. Click + to add one.</div>
+          <div className="empty">{t.items.empty}</div>
         </div>
       ) : (
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>SKU</th>
-                <th>Name</th>
-                <th>Unit</th>
-                <th>ID</th>
+                <th>{t.items.sku}</th>
+                <th>{t.items.name}</th>
+                <th>{t.items.unit}</th>
+                <th>{t.common.id}</th>
               </tr>
             </thead>
             <tbody>

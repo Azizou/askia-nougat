@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { majorToMinor, newId, today } from "../lib";
 import { useToast } from "../theme";
+import { useI18n } from "../i18n";
 
 interface Party {
   id: string;
@@ -10,6 +11,7 @@ interface Party {
 }
 
 export function Payments() {
+  const { t } = useI18n();
   const [parties, setParties] = useState<Party[]>([]);
   const [customerId, setCustomerId] = useState("");
   const [amountMajor, setAmountMajor] = useState("");
@@ -46,7 +48,7 @@ export function Payments() {
           allocations: [],
         },
       });
-      toast.push("Payment recorded.");
+      toast.push(t.payments.added);
       setCustomerId("");
       setAmountMajor("");
       setDate(today());
@@ -61,24 +63,24 @@ export function Payments() {
   return (
     <div>
       <div className="page-header">
-        <h1>Payments</h1>
+        <h1>{t.payments.title}</h1>
       </div>
 
       <section className="panel">
-        <h2 style={{ marginTop: 0 }}>Record Payment</h2>
+        <h2 style={{ marginTop: 0 }}>{t.payments.recordTitle}</h2>
         <p className="muted" style={{ marginTop: -4, marginBottom: 12 }}>
-          Records a customer payment as an unallocated prepayment.
+          {t.payments.hint}
         </p>
         <form onSubmit={submit} className="form">
           <div className="form-row">
             <label>
-              Customer
+              {t.payments.customer}
               <select
                 value={customerId}
                 onChange={(e) => setCustomerId(e.target.value)}
                 required
               >
-                <option value="">Select customer...</option>
+                <option value="">{t.payments.selectCustomer}</option>
                 {customers.map((p) => (
                   <option key={p.id} value={p.id}>
                     {p.name}
@@ -87,7 +89,7 @@ export function Payments() {
               </select>
             </label>
             <label>
-              Amount
+              {t.payments.amount}
               <input
                 type="number"
                 step="0.01"
@@ -98,7 +100,7 @@ export function Payments() {
               />
             </label>
             <label>
-              Date
+              {t.payments.date}
               <input
                 type="date"
                 value={date}
@@ -109,7 +111,7 @@ export function Payments() {
           </div>
           <div className="form-actions">
             <button type="submit" className="primary" disabled={submitting}>
-              {submitting ? "Recording..." : "Record Payment"}
+              {submitting ? t.common.recording : t.payments.submit}
             </button>
           </div>
           {error && <p className="error">{error}</p>}

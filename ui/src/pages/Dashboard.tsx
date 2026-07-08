@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { formatMoney, today } from "../lib";
+import { useI18n } from "../i18n";
 
 interface DashboardData {
   inventory_value: number;
@@ -31,6 +32,7 @@ interface Item {
 type SortKey = "item" | "qty";
 
 export function Dashboard() {
+  const { t } = useI18n();
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [stock, setStock] = useState<StockRow[]>([]);
   const [profit, setProfit] = useState<ProfitData | null>(null);
@@ -88,8 +90,10 @@ export function Dashboard() {
   return (
     <div>
       <div className="page-header">
-        <h1>Dashboard</h1>
-        <span className="shortcut-hint">Last refresh: {new Date().toLocaleTimeString()}</span>
+        <h1>{t.dashboard.title}</h1>
+        <span className="shortcut-hint">
+          {t.dashboard.lastRefresh}: {new Date().toLocaleTimeString()}
+        </span>
       </div>
 
       {error && <p className="error">{error}</p>}
@@ -97,50 +101,52 @@ export function Dashboard() {
       {dashboard && (
         <div className="kpi-grid">
           <div className="kpi-card">
-            <div className="kpi-label">Inventory Value</div>
+            <div className="kpi-label">{t.dashboard.inventoryValue}</div>
             <div className="kpi-value">{formatMoney(dashboard.inventory_value)}</div>
-            <div className="kpi-sub">On-hand cost basis</div>
+            <div className="kpi-sub">{t.dashboard.inventorySub}</div>
           </div>
           <div className="kpi-card success">
-            <div className="kpi-label">Accounts Receivable</div>
+            <div className="kpi-label">{t.dashboard.accountsReceivable}</div>
             <div className="kpi-value success">
               {formatMoney(dashboard.total_receivable)}
             </div>
-            <div className="kpi-sub">Owed to you</div>
+            <div className="kpi-sub">{t.dashboard.receivableSub}</div>
           </div>
           <div className="kpi-card warning">
-            <div className="kpi-label">Accounts Payable</div>
+            <div className="kpi-label">{t.dashboard.accountsPayable}</div>
             <div className="kpi-value warning">{formatMoney(dashboard.total_payable)}</div>
-            <div className="kpi-sub">You owe</div>
+            <div className="kpi-sub">{t.dashboard.payableSub}</div>
           </div>
           <div className={`kpi-card ${dashboard.checks_passing ? "success" : "danger"}`}>
-            <div className="kpi-label">Integrity Status</div>
+            <div className="kpi-label">{t.dashboard.integrityStatus}</div>
             <div
               className={`kpi-value text-value ${
                 dashboard.checks_passing ? "success" : "danger"
               }`}
             >
-              {dashboard.checks_passing ? "● All Passing" : "● FAILED"}
+              {dashboard.checks_passing
+                ? `● ${t.dashboard.allPassing}`
+                : `● ${t.dashboard.failed}`}
             </div>
-            <div className="kpi-sub">Ledger consistency</div>
+            <div className="kpi-sub">{t.dashboard.integritySub}</div>
           </div>
         </div>
       )}
 
       {profit && (
         <>
-          <h2>Profit (Last 6 Months)</h2>
+          <h2>{t.dashboard.profit}</h2>
           <div className="profit-row">
             <div className="profit-cell">
-              <div className="profit-label">Revenue</div>
+              <div className="profit-label">{t.dashboard.revenue}</div>
               <div className="profit-value">{formatMoney(profit.revenue_minor)}</div>
             </div>
             <div className="profit-cell">
-              <div className="profit-label">COGS</div>
+              <div className="profit-label">{t.dashboard.cogs}</div>
               <div className="profit-value">{formatMoney(profit.cogs_minor)}</div>
             </div>
             <div className="profit-cell">
-              <div className="profit-label">Gross Profit</div>
+              <div className="profit-label">{t.dashboard.grossProfit}</div>
               <div
                 className={`profit-value ${
                   profit.gross_profit_minor >= 0 ? "success" : "danger"
@@ -150,7 +156,7 @@ export function Dashboard() {
               </div>
             </div>
             <div className="profit-cell">
-              <div className="profit-label">Net Profit</div>
+              <div className="profit-label">{t.dashboard.netProfit}</div>
               <div
                 className={`profit-value ${
                   profit.net_profit_minor >= 0 ? "success" : "danger"
@@ -163,10 +169,10 @@ export function Dashboard() {
         </>
       )}
 
-      <h2>Stock on Hand</h2>
+      <h2>{t.dashboard.stockOnHand}</h2>
       {sortedStock.length === 0 ? (
         <div className="table-wrap">
-          <div className="empty">No stock recorded yet. Record a purchase to begin.</div>
+          <div className="empty">{t.dashboard.noStock}</div>
         </div>
       ) : (
         <div className="table-wrap">
@@ -174,14 +180,16 @@ export function Dashboard() {
             <thead>
               <tr>
                 <th style={{ cursor: "pointer" }} onClick={() => toggleSort("item")}>
-                  Item{sortArrow("item")}
+                  {t.dashboard.item}
+                  {sortArrow("item")}
                 </th>
                 <th
                   className="num"
                   style={{ cursor: "pointer" }}
                   onClick={() => toggleSort("qty")}
                 >
-                  Qty{sortArrow("qty")}
+                  {t.dashboard.qty}
+                  {sortArrow("qty")}
                 </th>
               </tr>
             </thead>
