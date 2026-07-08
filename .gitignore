@@ -1,6 +1,10 @@
 # Rust build artifacts
 target/
 
+# Node
+node_modules/
+ui/dist/
+
 # Re-include planning docs that the global ~/.gitignore excludes via `plans/`.
 # Must negate the DIRECTORY (not files under it): git won't descend into an
 # excluded directory, so `!.../plans/file.md` alone would not work.

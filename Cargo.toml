@@ -1,3 +1,3 @@
 [workspace]
-members = ["crates/accounting-core"]
+members = ["crates/accounting-core", "crates/tauri-app"]
 resolver = "2"

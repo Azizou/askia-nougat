@@ -1,0 +1,15 @@
+[package]
+name = "tauri-app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+accounting-core = { path = "../accounting-core" }
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+dirs = "6"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
