@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { newId } from "../lib";
+import { useToast } from "../theme";
 
 interface Item {
   id: string;
@@ -11,11 +12,14 @@ interface Item {
 
 export function Items() {
   const [items, setItems] = useState<Item[]>([]);
+  const [open, setOpen] = useState(false);
   const [sku, setSku] = useState("");
   const [name, setName] = useState("");
   const [unit, setUnit] = useState("ea");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const skuInput = useRef<HTMLInputElement | null>(null);
+  const toast = useToast();
 
   const refresh = async () => {
     try {
@@ -29,6 +33,18 @@ export function Items() {
     refresh();
   }, []);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        setOpen(true);
+        setTimeout(() => skuInput.current?.focus(), 100);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
@@ -40,9 +56,12 @@ export function Items() {
       setSku("");
       setName("");
       setUnit("ea");
+      setOpen(false);
+      toast.push(`Item "${name}" added.`);
       await refresh();
     } catch (e: unknown) {
       setError(String(e));
+      toast.push(String(e), "error");
     } finally {
       setSubmitting(false);
     }
@@ -50,54 +69,91 @@ export function Items() {
 
   return (
     <div>
-      <h1>Items</h1>
+      <div className="page-header">
+        <h1>Items</h1>
+        <span className="shortcut-hint">Press Ctrl+N to add new</span>
+      </div>
 
       <section className="panel">
-        <h2>Add Item</h2>
-        <form onSubmit={submit} className="form">
-          <label>
-            SKU
-            <input value={sku} onChange={(e) => setSku(e.target.value)} required />
-          </label>
-          <label>
-            Name
-            <input value={name} onChange={(e) => setName(e.target.value)} required />
-          </label>
-          <label>
-            Unit
-            <input value={unit} onChange={(e) => setUnit(e.target.value)} required />
-          </label>
-          <button type="submit" disabled={submitting}>
-            {submitting ? "Adding..." : "Add Item"}
+        <div className="panel-header" onClick={() => setOpen((o) => !o)}>
+          <h2>{open ? "New Item" : `${items.length} Items`}</h2>
+          <button
+            className="add-btn icon-only"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen((o) => !o);
+            }}
+            title={open ? "Close" : "Add item"}
+          >
+            {open ? "×" : "+"}
           </button>
-        </form>
-        {error && <p className="error">{error}</p>}
+        </div>
+        <div className={`form-collapse${open ? " open" : ""}`}>
+          <form onSubmit={submit} className="form">
+            <div className="form-row">
+              <label>
+                SKU
+                <input
+                  ref={skuInput}
+                  value={sku}
+                  onChange={(e) => setSku(e.target.value)}
+                  required
+                />
+              </label>
+              <label>
+                Name
+                <input value={name} onChange={(e) => setName(e.target.value)} required />
+              </label>
+              <label>
+                Unit
+                <input value={unit} onChange={(e) => setUnit(e.target.value)} required />
+              </label>
+            </div>
+            <div className="form-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setOpen(false)}
+                disabled={submitting}
+              >
+                Cancel
+              </button>
+              <button type="submit" className="primary" disabled={submitting}>
+                {submitting ? "Adding..." : "Add Item"}
+              </button>
+            </div>
+            {error && <p className="error">{error}</p>}
+          </form>
+        </div>
       </section>
 
-      <h2>All Items</h2>
       {items.length === 0 ? (
-        <p className="muted">No items yet.</p>
+        <div className="table-wrap">
+          <div className="empty">No items yet. Click + to add one.</div>
+        </div>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>SKU</th>
-              <th>Name</th>
-              <th>Unit</th>
-              <th>ID</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((i) => (
-              <tr key={i.id}>
-                <td>{i.sku}</td>
-                <td>{i.name}</td>
-                <td>{i.unit}</td>
-                <td className="mono">{i.id}</td>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>SKU</th>
+                <th>Name</th>
+                <th>Unit</th>
+                <th>ID</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {items.map((i) => (
+                <tr key={i.id}>
+                  <td>{i.sku}</td>
+                  <td>{i.name}</td>
+                  <td>{i.unit}</td>
+                  <td className="mono">{i.id.slice(0, 8)}...</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );

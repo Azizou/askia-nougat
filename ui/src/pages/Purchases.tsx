@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { formatMoney, majorToMinor, newId, today } from "../lib";
+import { useToast } from "../theme";
 
 type Terms = "cash" | "credit";
 
@@ -39,12 +40,14 @@ export function Purchases() {
   const [parties, setParties] = useState<Party[]>([]);
   const [items, setItems] = useState<Item[]>([]);
 
+  const [open, setOpen] = useState(false);
   const [supplierId, setSupplierId] = useState("");
   const [date, setDate] = useState(today());
   const [terms, setTerms] = useState<Terms>("credit");
   const [lines, setLines] = useState<LineDraft[]>([emptyLine()]);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const toast = useToast();
 
   const refresh = async () => {
     try {
@@ -65,12 +68,22 @@ export function Purchases() {
     refresh();
   }, []);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        setOpen(true);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
   const suppliers = parties.filter((p) => p.kind === "supplier" || p.kind === "both");
 
   const updateLine = (idx: number, patch: Partial<LineDraft>) => {
     setLines((ls) => ls.map((l, i) => (i === idx ? { ...l, ...patch } : l)));
   };
-
   const addLine = () => setLines((ls) => [...ls, emptyLine()]);
   const removeLine = (idx: number) =>
     setLines((ls) => (ls.length === 1 ? ls : ls.filter((_, i) => i !== idx)));
@@ -98,9 +111,12 @@ export function Purchases() {
       setDate(today());
       setTerms("credit");
       setLines([emptyLine()]);
+      setOpen(false);
+      toast.push("Purchase recorded.");
       await refresh();
     } catch (e: unknown) {
       setError(String(e));
+      toast.push(String(e), "error");
     } finally {
       setSubmitting(false);
     }
@@ -110,124 +126,174 @@ export function Purchases() {
 
   return (
     <div>
-      <h1>Purchases</h1>
+      <div className="page-header">
+        <h1>Purchases</h1>
+        <span className="shortcut-hint">Press Ctrl+N to add new</span>
+      </div>
 
       <section className="panel">
-        <h2>Record Purchase</h2>
-        <form onSubmit={submit} className="form">
-          <label>
-            Supplier
-            <select
-              value={supplierId}
-              onChange={(e) => setSupplierId(e.target.value)}
-              required
-            >
-              <option value="">Select supplier...</option>
-              {suppliers.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            Date
-            <input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              required
-            />
-          </label>
-          <label>
-            Terms
-            <select value={terms} onChange={(e) => setTerms(e.target.value as Terms)}>
-              <option value="cash">Cash</option>
-              <option value="credit">Credit</option>
-            </select>
-          </label>
-
-          <div className="lines">
-            <div className="lines-header">
-              <strong>Lines</strong>
-              <button type="button" onClick={addLine}>
-                + Add Line
-              </button>
-            </div>
-            {lines.map((line, idx) => (
-              <div className="line" key={idx}>
+        <div className="panel-header" onClick={() => setOpen((o) => !o)}>
+          <h2>{open ? "Record Purchase" : `${purchases.length} Purchases`}</h2>
+          <button
+            className="add-btn icon-only"
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen((o) => !o);
+            }}
+            title={open ? "Close" : "Record purchase"}
+          >
+            {open ? "×" : "+"}
+          </button>
+        </div>
+        <div className={`form-collapse${open ? " open" : ""}`}>
+          <form onSubmit={submit} className="form">
+            <div className="form-row">
+              <label>
+                Supplier
                 <select
-                  value={line.item_id}
-                  onChange={(e) => updateLine(idx, { item_id: e.target.value })}
+                  value={supplierId}
+                  onChange={(e) => setSupplierId(e.target.value)}
                   required
                 >
-                  <option value="">Item...</option>
-                  {items.map((it) => (
-                    <option key={it.id} value={it.id}>
-                      {it.name} ({it.sku})
+                  <option value="">Select supplier...</option>
+                  {suppliers.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}
                     </option>
                   ))}
                 </select>
+              </label>
+              <label>
+                Date
                 <input
-                  type="number"
-                  step="any"
-                  placeholder="Qty"
-                  value={line.qty}
-                  onChange={(e) => updateLine(idx, { qty: e.target.value })}
+                  type="date"
+                  value={date}
+                  onChange={(e) => setDate(e.target.value)}
                   required
                 />
-                <input
-                  type="number"
-                  step="0.01"
-                  placeholder="Unit cost"
-                  value={line.unit_cost_major}
-                  onChange={(e) => updateLine(idx, { unit_cost_major: e.target.value })}
-                  required
-                />
-                <button
-                  type="button"
-                  onClick={() => removeLine(idx)}
-                  disabled={lines.length === 1}
+              </label>
+              <label>
+                Terms
+                <select
+                  value={terms}
+                  onChange={(e) => setTerms(e.target.value as Terms)}
                 >
-                  Remove
+                  <option value="cash">Cash</option>
+                  <option value="credit">Credit</option>
+                </select>
+              </label>
+            </div>
+
+            <div className="lines">
+              <div className="lines-header">
+                <strong>Lines</strong>
+                <button type="button" className="secondary" onClick={addLine}>
+                  + Add Line
                 </button>
               </div>
-            ))}
-          </div>
+              {lines.map((line, idx) => (
+                <div className="line" key={idx}>
+                  <select
+                    value={line.item_id}
+                    onChange={(e) => updateLine(idx, { item_id: e.target.value })}
+                    required
+                  >
+                    <option value="">Item...</option>
+                    {items.map((it) => (
+                      <option key={it.id} value={it.id}>
+                        {it.name} ({it.sku})
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="Qty"
+                    value={line.qty}
+                    onChange={(e) => updateLine(idx, { qty: e.target.value })}
+                    required
+                  />
+                  <input
+                    type="number"
+                    step="0.01"
+                    placeholder="Unit cost"
+                    value={line.unit_cost_major}
+                    onChange={(e) =>
+                      updateLine(idx, { unit_cost_major: e.target.value })
+                    }
+                    required
+                  />
+                  <button
+                    type="button"
+                    className="ghost"
+                    onClick={() => removeLine(idx)}
+                    disabled={lines.length === 1}
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
 
-          <button type="submit" disabled={submitting}>
-            {submitting ? "Recording..." : "Record Purchase"}
-          </button>
-        </form>
-        {error && <p className="error">{error}</p>}
+            <div className="form-actions">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => setOpen(false)}
+                disabled={submitting}
+              >
+                Cancel
+              </button>
+              <button type="submit" className="primary" disabled={submitting}>
+                {submitting ? "Recording..." : "Record Purchase"}
+              </button>
+            </div>
+            {error && <p className="error">{error}</p>}
+          </form>
+        </div>
       </section>
 
-      <h2>All Purchases</h2>
       {purchases.length === 0 ? (
-        <p className="muted">No purchases yet.</p>
+        <div className="table-wrap">
+          <div className="empty">No purchases yet. Click + to record one.</div>
+        </div>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>Date</th>
-              <th>Supplier</th>
-              <th>Terms</th>
-              <th>Total</th>
-              <th>Outstanding</th>
-            </tr>
-          </thead>
-          <tbody>
-            {purchases.map((p) => (
-              <tr key={p.id}>
-                <td>{p.date}</td>
-                <td>{supplierName(p.supplier_id)}</td>
-                <td>{p.terms}</td>
-                <td>{formatMoney(p.total_minor)}</td>
-                <td>{formatMoney(p.outstanding_minor)}</td>
+        <div className="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Date</th>
+                <th>Supplier</th>
+                <th>Terms</th>
+                <th className="num">Total</th>
+                <th className="num">Outstanding</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {purchases.map((p) => (
+                <tr key={p.id}>
+                  <td>{p.date}</td>
+                  <td>{supplierName(p.supplier_id)}</td>
+                  <td>
+                    <span className={`badge ${p.terms === "cash" ? "success" : ""}`}>
+                      {p.terms}
+                    </span>
+                  </td>
+                  <td className="num">{formatMoney(p.total_minor)}</td>
+                  <td className="num">
+                    <span
+                      className={
+                        p.outstanding_minor > 0 ? "warn" : "ok"
+                      }
+                    >
+                      {formatMoney(p.outstanding_minor)}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );
