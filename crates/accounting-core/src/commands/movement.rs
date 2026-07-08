@@ -14,6 +14,7 @@ fn ensure_account(ctx: &CommandContext, account_id: &str) -> Result<(), CommandE
     if found.is_none() { Err(reject(format!("unknown account: {account_id}"))) } else { Ok(()) }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_expense_recorded(
     ctx: &mut CommandContext, expense_id: &str, account_id: &str, amount_minor: i64,
     date: &str, terms: &str, supplier_id: Option<&str>, memo: Option<&str>,

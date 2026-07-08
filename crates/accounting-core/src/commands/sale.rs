@@ -257,7 +257,7 @@ mod tests {
     #[test]
     fn sale_two_same_item_lines_exceeding_one_lot_rejected() {
         let (mut conn, mut hlc) = fixture();
-        crate::genesis::run_genesis(&mut conn, &mut hlc, 1000, "deviceA", "owner-1", "Owner").unwrap();
+        crate::genesis::run_genesis(&conn, &mut hlc, 1000, "deviceA", "owner-1", "Owner").unwrap();
         crate::projectors::rebuild(&mut conn).unwrap();
         {
             let mut c = ctx(&mut conn, &mut hlc);

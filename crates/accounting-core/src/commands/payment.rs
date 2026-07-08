@@ -76,6 +76,7 @@ pub fn handle_payment_received(
     commit_event(ctx, "PaymentReceived", payload)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_payment_allocated(
     ctx: &mut CommandContext, _alloc_event_id: &str, source_payment_id: &str,
     party_id: &str, date: &str, allocations: Vec<AllocInput>,

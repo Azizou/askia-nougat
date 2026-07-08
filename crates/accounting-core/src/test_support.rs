@@ -1,4 +1,5 @@
 #![cfg(test)]
+#![allow(dead_code)]
 
 use crate::commands::CommandContext;
 use crate::commands::setup::{handle_item_defined, handle_party_created};

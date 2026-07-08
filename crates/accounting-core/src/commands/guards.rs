@@ -22,11 +22,6 @@ pub(crate) fn check_at_least_one_line<T>(lines: &[T]) -> Result<(), CommandError
     if lines.is_empty() { Err(reject("event must have >= 1 line")) } else { Ok(()) }
 }
 
-pub(crate) fn check_oversell(conn: &Connection, lot_id: &str, qty: i64) -> Result<(), CommandError> {
-    let mut d = LotDemand::new();
-    d.take(conn, lot_id, qty)
-}
-
 pub(crate) struct LotDemand {
     claimed: HashMap<String, i64>,
 }
@@ -342,15 +337,15 @@ mod tests {
     fn oversell_guard_rejects_taking_more_than_remaining() {
         let conn = crate::db::open_in_memory_with_schema().unwrap();
         seed_lot(&conn, "lot1", "itemA", 10);
-        assert!(check_oversell(&conn, "lot1", 15).is_err(), "15 > 10 must reject");
-        assert!(check_oversell(&conn, "lot1", 10).is_ok());
-        assert!(check_oversell(&conn, "lot1", 6).is_ok());
+        assert!(LotDemand::new().take(&conn, "lot1", 15).is_err(), "15 > 10 must reject");
+        assert!(LotDemand::new().take(&conn, "lot1", 10).is_ok());
+        assert!(LotDemand::new().take(&conn, "lot1", 6).is_ok());
     }
 
     #[test]
     fn oversell_guard_rejects_unknown_lot() {
         let conn = crate::db::open_in_memory_with_schema().unwrap();
-        assert!(check_oversell(&conn, "ghost", 1).is_err(), "unknown lot must reject");
+        assert!(LotDemand::new().take(&conn, "ghost", 1).is_err(), "unknown lot must reject");
     }
 
     #[test]

@@ -57,6 +57,8 @@ pub fn handle_transaction_reversed(
         }
         "PaymentMade" | "PaymentReceived" => {
             let payment_id = tpayload["paymentId"].as_str().unwrap_or_default();
+            // Empty invoice_id: edges 1-2 (allocations/returns against an invoice)
+            // are no-ops; only edge 3 (PaymentAllocated drew this payment's credit) evaluates.
             check_reversal_downstream(ctx.conn, "sale", "", Some(payment_id))?;
         }
         "SaleReturnRecorded" => {

@@ -261,4 +261,49 @@ mod e2e {
         let reversed: i64 = conn.query_row("SELECT reversed FROM purchases WHERE id='pur1'", [], |r| r.get(0)).unwrap();
         assert_eq!(reversed, 1, "projector must set reversed = 1");
     }
+
+    #[test]
+    fn payment_reversal_reopens_invoice_and_restores_party() {
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("deviceA");
+        {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_account_opened(&mut c, "bank", "Bank", "asset", "debit", Some("bank")).unwrap();
+            handle_account_opened(&mut c, "inv", "Inventory", "asset", "debit", Some("inventory")).unwrap();
+            handle_account_opened(&mut c, "ar", "AR", "asset", "debit", Some("accounts_receivable")).unwrap();
+            handle_account_opened(&mut c, "sales_acct", "Sales", "income", "credit", Some("sales")).unwrap();
+            handle_account_opened(&mut c, "cogs_acct", "COGS", "expense", "debit", Some("cogs")).unwrap();
+            handle_party_created(&mut c, "sup1", "Sup", "supplier").unwrap();
+            handle_party_created(&mut c, "cust1", "Cust", "customer").unwrap();
+            handle_item_defined(&mut c, "itemA", "A", "A", "ea").unwrap();
+            handle_purchase_recorded(&mut c, "pur1", "sup1", "2026-01-01", "cash",
+                vec![PurchaseLineInput{ item_id:"itemA".into(), qty:10, unit_cost_minor:100 }]).unwrap();
+            handle_sale_recorded(&mut c, "sale1", "cust1", "2026-02-01", "credit",
+                vec![SaleLineInput{ item_id:"itemA".into(), qty:5, unit_price_minor:1000, lot_picks: None }]).unwrap();
+        }
+        // Payment settles the sale fully (5000).
+        let pay_ev = {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_payment_received(&mut c, "pay1", "cust1", 5000, "2026-03-01",
+                vec![AllocInput{ target_id:"sale1".into(), target_type:"sale".into(), amount_minor:5000 }]).unwrap()
+        };
+        // Verify settled state.
+        let out_before: i64 = conn.query_row("SELECT outstanding_minor FROM sales WHERE id='sale1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(out_before, 0);
+        let recv_before: i64 = conn.query_row("SELECT receivable_minor FROM party_balances WHERE party_id='cust1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(recv_before, 0);
+        // Reverse the payment.
+        {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_transaction_reversed(&mut c, &pay_ev.id, "payment error").unwrap();
+        }
+        // Invoice must re-open, party receivable must restore.
+        let out_after: i64 = conn.query_row("SELECT outstanding_minor FROM sales WHERE id='sale1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(out_after, 5000, "invoice must re-open after payment reversal");
+        let recv_after: i64 = conn.query_row("SELECT receivable_minor FROM party_balances WHERE party_id='cust1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(recv_after, 5000, "receivable must restore");
+        // Payment row must be deleted.
+        let pay_count: i64 = conn.query_row("SELECT COUNT(*) FROM payments WHERE id='pay1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(pay_count, 0, "payments row must be deleted by reversal clause 3");
+    }
 }
