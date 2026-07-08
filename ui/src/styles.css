@@ -139,18 +139,11 @@ h3 {
   grid-area: header;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
   padding: 0 16px;
   background: var(--bg-header);
   border-bottom: 1px solid var(--border);
   z-index: 10;
-}
-
-.header-left,
-.header-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
 }
 
 .header-brand {
@@ -158,6 +151,57 @@ h3 {
   font-weight: 600;
   color: var(--text-primary);
   letter-spacing: -0.01em;
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  padding: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-footer-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  background: transparent;
+  border: none;
+  color: var(--text-sidebar-muted);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  border-radius: 6px;
+  text-align: left;
+}
+
+.sidebar-footer-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-sidebar);
+}
+
+.sidebar.collapsed .sidebar-footer-btn .nav-label { display: none; }
+
+.fab-menu {
+  display: none;
+  position: fixed;
+  bottom: 20px;
+  left: 20px;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: white;
+  border: none;
+  font-size: 1.4rem;
+  cursor: pointer;
+  z-index: 90;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  align-items: center;
+  justify-content: center;
 }
 
 .icon-btn {
@@ -901,6 +945,10 @@ td.mono {
     inset: 48px 0 0 0;
     background: rgba(0, 0, 0, 0.4);
     z-index: 99;
+  }
+
+  .fab-menu {
+    display: flex;
   }
 
   .sidebar.collapsed {

@@ -28,7 +28,7 @@ function App() {
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     return window.localStorage.getItem(SIDEBAR_KEY) === "1";
   });
-  const { theme, label, icon, cycle } = useTheme();
+  const { label, icon, cycle } = useTheme();
   const { t, localeLabel, cycleLocale } = useI18n();
 
   useEffect(() => {
@@ -36,34 +36,9 @@ function App() {
   }, [collapsed]);
 
   return (
-    <div className="app" data-theme-current={theme}>
+    <div className="app">
       <header className="header">
-        <div className="header-left">
-          <button
-            className="icon-btn"
-            onClick={() => setCollapsed((c) => !c)}
-            aria-label={t.app.toggleSidebar}
-            title={t.app.toggleSidebar}
-          >
-            ☰
-          </button>
-          <span className="header-brand">{t.app.name}</span>
-        </div>
-        <div className="header-right">
-          <button
-            className="locale-btn"
-            onClick={cycleLocale}
-            title={t.app.switchLocale}
-            aria-label={t.app.switchLocale}
-          >
-            <span>🌐</span>
-            <span>{localeLabel}</span>
-          </button>
-          <button className="theme-btn" onClick={cycle} title={t.app.cycleTheme}>
-            <span>{icon}</span>
-            <span>{label}</span>
-          </button>
-        </div>
+        <span className="header-brand">{t.app.name}</span>
       </header>
 
       {!collapsed && <div className="sidebar-backdrop" onClick={() => setCollapsed(true)} />}
@@ -82,6 +57,33 @@ function App() {
             </li>
           ))}
         </ul>
+
+        <div className="sidebar-footer">
+          <button
+            className="sidebar-footer-btn"
+            onClick={cycleLocale}
+            title={t.app.switchLocale}
+          >
+            <span className="nav-icon">🌐</span>
+            <span className="nav-label">{localeLabel}</span>
+          </button>
+          <button
+            className="sidebar-footer-btn"
+            onClick={cycle}
+            title={t.app.cycleTheme}
+          >
+            <span className="nav-icon">{icon}</span>
+            <span className="nav-label">{label}</span>
+          </button>
+          <button
+            className="sidebar-footer-btn"
+            onClick={() => setCollapsed((c) => !c)}
+            title={t.app.toggleSidebar}
+          >
+            <span className="nav-icon">{collapsed ? "▶" : "◀"}</span>
+            <span className="nav-label">{t.app.toggleSidebar}</span>
+          </button>
+        </div>
       </nav>
 
       <main className="main">
@@ -92,6 +94,16 @@ function App() {
         {page === "sales" && <Sales />}
         {page === "payments" && <Payments />}
       </main>
+
+      {collapsed && (
+        <button
+          className="fab-menu"
+          onClick={() => setCollapsed(false)}
+          aria-label={t.app.toggleSidebar}
+        >
+          ☰
+        </button>
+      )}
     </div>
   );
 }
