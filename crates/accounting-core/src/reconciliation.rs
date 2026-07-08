@@ -225,6 +225,22 @@ mod tests {
     }
 
     #[test]
+    fn gross_profit_fails_when_return_netting_corrupted() {
+        let (conn, _) = open_seeded();
+        // Corrupt the returns revenue_reversed so the engine's netting term drifts
+        // from the journal (which already has the return's Dr Sales posted). This
+        // proves the returns-netting term in check #2 is load-bearing — without it,
+        // the check would still pass because both sides would be equally wrong.
+        conn.execute(
+            "UPDATE returns SET revenue_reversed_minor = revenue_reversed_minor + 500 WHERE return_type = 'sale_return'",
+            []).unwrap();
+        match check_gross_profit(&conn).unwrap() {
+            CheckOutcome::Fail(msg) => assert!(msg.contains("engine") || msg.contains("journal"), "got {msg}"),
+            CheckOutcome::Pass => panic!("check must FAIL when return netting is corrupted"),
+        }
+    }
+
+    #[test]
     fn double_entry_balances_on_correct_state() {
         let (conn, _) = open_seeded();
         assert_eq!(check_double_entry(&conn).unwrap(), CheckOutcome::Pass);
