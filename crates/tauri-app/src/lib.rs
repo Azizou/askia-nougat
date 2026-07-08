@@ -7,21 +7,17 @@ use state::AppState;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tauri::Manager;
 
 fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64
 }
 
-fn db_path() -> PathBuf {
-    let dir = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("accounting");
-    fs::create_dir_all(&dir).ok();
-    dir.join("ledger.db")
-}
+fn init_state(app_data_dir: PathBuf) -> AppState {
+    let dir = app_data_dir.join("accounting");
+    fs::create_dir_all(&dir).expect("create data dir");
+    let path = dir.join("ledger.db");
 
-fn init_state() -> AppState {
-    let path = db_path();
     let conn = rusqlite::Connection::open(&path).expect("open db");
     conn.pragma_update(None, "journal_mode", "WAL").ok();
     conn.pragma_update(None, "synchronous", "NORMAL").ok();
@@ -39,9 +35,16 @@ fn init_state() -> AppState {
     AppState::new(conn, hlc)
 }
 
-fn build_app() -> tauri::Builder<tauri::Wry> {
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
     tauri::Builder::default()
-        .manage(init_state())
+        .setup(|app| {
+            let data_dir = app.path().app_local_data_dir()
+                .expect("failed to resolve app data dir");
+            let state = init_state(data_dir);
+            app.manage(state);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::create_item,
             commands::create_party,
@@ -56,11 +59,6 @@ fn build_app() -> tauri::Builder<tauri::Wry> {
             commands::list_sales,
             commands::list_purchases,
         ])
-}
-
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() {
-    build_app()
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
