@@ -40,3 +40,6 @@ Maintained by the reviewer agent. Each entry records issues found, severity, and
 | 25 | P3 Task 13 | movement.rs, guards.rs | No issues — credit-expense party guard enforced, self-transfer, write-down-only, found lotId deterministic | — | — | PASS |
 | 26 | P3 Task 14 | guards.rs | No issues — all 5 reversal edges correct, no cascade, edge 3/5 sound | — | — | PASS |
 | 27 | P3 Task 15 | reversal.rs | No issues — guard orchestration by category, frozen accountId lines, clause 1 only | — | — | PASS |
+| 28 | P4 Task 1 | test_support.rs, reconciliation.rs | No issues — fixture drives real handlers, check #1 correct | — | — | PASS |
+| 29 | P4 Tasks 2-8 | reconciliation.rs | No issues — all 7 checks correct, net form, terms-aware, null-safe | — | — | PASS |
+| 30 | P4 Tasks 9-11 | reconciliation.rs, queries.rs | No issues — aggregator, units_sold, gross/net profit, IS NOT null-safe | — | — | PASS |

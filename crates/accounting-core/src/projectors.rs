@@ -719,21 +719,25 @@ fn transaction_reversed(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<(
             tx.execute("DELETE FROM payment_allocations WHERE event_id = ?1", [target_id])?;
         }
         "SaleRecorded" => {
-            let (customer, total): (Option<String>, i64) = tx.query_row(
-                "SELECT customer_id, total_minor FROM sales WHERE id = ?1",
-                [ps(&tp, "saleId")], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let (customer, total, terms): (Option<String>, i64, String) = tx.query_row(
+                "SELECT customer_id, total_minor, terms FROM sales WHERE id = ?1",
+                [ps(&tp, "saleId")], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             tx.execute("UPDATE sales SET outstanding_minor = 0 WHERE id = ?1", [ps(&tp, "saleId")])?;
-            if let Some(c) = customer {
-                adjust_party_balance(tx, &c, -total, 0, 0, 0)?;
+            if terms == "credit" {
+                if let Some(c) = customer {
+                    adjust_party_balance(tx, &c, -total, 0, 0, 0)?;
+                }
             }
         }
         "PurchaseRecorded" => {
-            let (supplier, total): (Option<String>, i64) = tx.query_row(
-                "SELECT supplier_id, total_minor FROM purchases WHERE id = ?1",
-                [ps(&tp, "purchaseId")], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let (supplier, total, terms): (Option<String>, i64, String) = tx.query_row(
+                "SELECT supplier_id, total_minor, terms FROM purchases WHERE id = ?1",
+                [ps(&tp, "purchaseId")], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
             tx.execute("UPDATE purchases SET outstanding_minor = 0 WHERE id = ?1", [ps(&tp, "purchaseId")])?;
-            if let Some(s) = supplier {
-                adjust_party_balance(tx, &s, 0, -total, 0, 0)?;
+            if terms == "credit" {
+                if let Some(s) = supplier {
+                    adjust_party_balance(tx, &s, 0, -total, 0, 0)?;
+                }
             }
         }
         _ => {}
