@@ -49,6 +49,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           projectPath: crates/tauri-app
+          args: --bundles msi,nsis # Windows installers only
           tagName: ${{ github.ref_name }}
           releaseName: "Accounting ${{ github.ref_name }}"
           releaseBody: "Windows installer for Accounting. Download the `.msi` or `.exe` below."
