@@ -1,7 +1,7 @@
-export function formatMoney(minor: number): string {
-  return (minor / 100).toLocaleString(undefined, {
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2,
+export function formatMoney(minor: number, locale?: string): string {
+  return (minor / 100).toLocaleString(locale ?? undefined, {
+    minimumFractionDigits: 0,
+    maximumFractionDigits: 0,
   });
 }
 

@@ -1,9 +1,25 @@
 # Rust build artifacts
 target/
 
+# Nested crate lockfiles — the workspace root Cargo.lock is authoritative
+crates/*/Cargo.lock
+
 # Node
 node_modules/
 ui/dist/
+
+# macOS
+.DS_Store
+
+# Built app artifacts
+*.apk
+*.apk.idsig
+
+# Generated / large test datasets (regenerate via datasets/generate.py)
+datasets/
+
+# Personal review & feedback notes
+*feedback*.md
 
 # Re-include planning docs that the global ~/.gitignore excludes via `plans/`.
 # Must negate the DIRECTORY (not files under it): git won't descend into an
