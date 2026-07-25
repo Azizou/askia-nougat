@@ -1,0 +1,56 @@
+name: Release (Windows)
+
+# Build the Windows installer and publish it to a GitHub Release whenever a
+# version tag (e.g. v0.1.0) is pushed. The .msi and NSIS .exe become
+# downloadable assets on the repo's Releases page.
+on:
+  push:
+    tags:
+      - "v*"
+  # Allow manual runs from the Actions tab for testing (produces artifacts,
+  # but only tag pushes create a Release).
+  workflow_dispatch:
+
+permissions:
+  contents: write # required for tauri-action to create the Release
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo build
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ". -> target"
+
+      - name: Build frontend
+        working-directory: ui
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build Tauri app and publish release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          projectPath: crates/tauri-app
+          tagName: ${{ github.ref_name }}
+          releaseName: "Accounting ${{ github.ref_name }}"
+          releaseBody: "Windows installer for Accounting. Download the `.msi` or `.exe` below."
+          releaseDraft: false
+          prerelease: false
