@@ -8,6 +8,7 @@ import { Payments } from "./pages/Payments";
 import { Faq } from "./pages/Faq";
 import { useTheme } from "./theme";
 import { useI18n } from "./i18n";
+import { useSettings } from "./settings";
 
 type Page = "dashboard" | "items" | "parties" | "purchases" | "sales" | "payments" | "faq";
 
@@ -30,12 +31,21 @@ function App() {
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     return window.localStorage.getItem(SIDEBAR_KEY) === "1";
   });
-  const { label, icon, cycle } = useTheme();
-  const { t, localeLabel, cycleLocale } = useI18n();
+  const { label, icon, cycle, set: setTheme } = useTheme();
+  const { t, localeLabel, cycleLocale, setLocale } = useI18n();
+  const { settings, ready } = useSettings();
 
   useEffect(() => {
     window.localStorage.setItem(SIDEBAR_KEY, collapsed ? "1" : "0");
   }, [collapsed]);
+
+  useEffect(() => {
+    if (!ready) return;
+    const scale = settings.font_size === "small" ? 0.9 : settings.font_size === "large" ? 1.15 : 1.0;
+    document.documentElement.style.setProperty("--font-scale", String(scale));
+    if (settings.theme) setTheme(settings.theme as "light" | "dark" | "midnight");
+    if (settings.locale) setLocale(settings.locale as "fr" | "en");
+  }, [ready, settings.font_size, settings.theme, settings.locale, setTheme, setLocale]);
 
   return (
     <div className="app">
