@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { formatMoney, majorToMinor, newId, today , errorMessage } from "../lib";
+import { majorToMinor, newId, today , errorMessage } from "../lib";
 import { useToast } from "../theme";
 import { useI18n } from "../i18n";
+import { useCurrency } from "../settings";
 
 type Terms = "cash" | "credit";
+
+const WALKIN_PARTY_ID = "party_walkin";
 
 interface Party {
   id: string;
@@ -21,6 +24,7 @@ interface Item {
 
 interface Sale {
   id: string;
+  event_id: string;
   customer_id: string;
   date: string;
   terms: Terms;
@@ -38,6 +42,7 @@ const emptyLine = (): LineDraft => ({ item_id: "", qty: "", unit_price_major: ""
 
 export function Sales() {
   const { t } = useI18n();
+  const { format } = useCurrency();
   const [sales, setSales] = useState<Sale[]>([]);
   const [parties, setParties] = useState<Party[]>([]);
   const [items, setItems] = useState<Item[]>([]);
@@ -81,6 +86,10 @@ export function Sales() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  useEffect(() => {
+    if (terms === "cash" && !customerId) setCustomerId(WALKIN_PARTY_ID);
+  }, [terms, customerId]);
+
   const customers = parties.filter((p) => p.kind === "customer" || p.kind === "both");
 
   const updateLine = (idx: number, patch: Partial<LineDraft>) => {
@@ -121,6 +130,18 @@ export function Sales() {
       toast.push(errorMessage(e), "error");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const voidSale = async (s: Sale) => {
+    const reason = window.prompt(t.common.voidConfirm);
+    if (!reason) return;
+    try {
+      await invoke("reverse_transaction", { input: { target_event_id: s.event_id, reason } });
+      toast.push(t.common.voided);
+      await refresh();
+    } catch (e: unknown) {
+      toast.push(errorMessage(e), "error");
     }
   };
 
@@ -270,6 +291,7 @@ export function Sales() {
                 <th>{t.sales.terms}</th>
                 <th className="num">{t.sales.total}</th>
                 <th className="num">{t.sales.outstanding}</th>
+                <th>{t.common.actions}</th>
               </tr>
             </thead>
             <tbody>
@@ -282,11 +304,16 @@ export function Sales() {
                       {termsLabel(s.terms)}
                     </span>
                   </td>
-                  <td className="num">{formatMoney(s.total_minor)}</td>
+                  <td className="num">{format(s.total_minor)}</td>
                   <td className="num">
                     <span className={s.outstanding_minor > 0 ? "warn" : "ok"}>
-                      {formatMoney(s.outstanding_minor)}
+                      {format(s.outstanding_minor)}
                     </span>
+                  </td>
+                  <td>
+                    <button className="ghost" onClick={() => voidSale(s)}>
+                      {t.common.void}
+                    </button>
                   </td>
                 </tr>
               ))}
