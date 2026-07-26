@@ -2,7 +2,8 @@ use crate::error::AppError;
 use crate::state::AppState;
 use accounting_core::{
     handle_item_defined, handle_party_created, handle_purchase_recorded,
-    handle_sale_recorded, handle_payment_received, run_all_checks, all_passed,
+    handle_sale_recorded, handle_payment_received, handle_payment_made,
+    handle_transaction_reversed, run_all_checks, all_passed,
     CommandContext, PurchaseLineInput, SaleLineInput, AllocInput,
 };
 use serde::{Deserialize, Serialize};
@@ -155,6 +156,42 @@ pub fn set_setting(state: State<AppState>, key: String, value: String) -> Result
     accounting_core::set_setting(&db.conn, &key, &value).map_err(AppError::from)
 }
 
+// ---- Supplier payment + reversal commands ----
+
+#[derive(Deserialize)]
+pub struct PaymentMadeInput {
+    pub id: String,
+    pub supplier_id: String,
+    pub amount_minor: i64,
+    pub date: String,
+    pub allocations: Vec<AllocationDto>,
+}
+
+#[tauri::command]
+pub fn record_payment_made(state: State<AppState>, input: PaymentMadeInput) -> Result<(), AppError> {
+    with_ctx!(state, |ctx| {
+        let allocs: Vec<AllocInput> = input.allocations.into_iter().map(|a| AllocInput {
+            target_id: a.target_id, target_type: a.target_type, amount_minor: a.amount_minor,
+        }).collect();
+        handle_payment_made(&mut ctx, &input.id, &input.supplier_id, input.amount_minor, &input.date, allocs)?;
+        Ok(())
+    })
+}
+
+#[derive(Deserialize)]
+pub struct ReversalInput {
+    pub target_event_id: String,
+    pub reason: String,
+}
+
+#[tauri::command]
+pub fn reverse_transaction(state: State<AppState>, input: ReversalInput) -> Result<(), AppError> {
+    with_ctx!(state, |ctx| {
+        handle_transaction_reversed(&mut ctx, &input.target_event_id, &input.reason)?;
+        Ok(())
+    })
+}
+
 // ---- Query commands ----
 
 #[derive(Serialize)]
@@ -255,6 +292,7 @@ pub fn list_parties(state: State<AppState>) -> Result<Vec<PartyRow>, AppError> {
 #[derive(Serialize)]
 pub struct SaleRow {
     pub id: String,
+    pub event_id: String,
     pub customer_id: Option<String>,
     pub date: String,
     pub terms: String,
@@ -266,9 +304,9 @@ pub struct SaleRow {
 pub fn list_sales(state: State<AppState>) -> Result<Vec<SaleRow>, AppError> {
     let db = state.db.lock().unwrap();
     let mut stmt = db.conn.prepare(
-        "SELECT id, customer_id, date, terms, total_minor, outstanding_minor FROM sales WHERE reversed = 0 ORDER BY date DESC")?;
+        "SELECT id, event_id, customer_id, date, terms, total_minor, outstanding_minor FROM sales WHERE reversed = 0 ORDER BY date DESC")?;
     let rows = stmt.query_map([], |r| {
-        Ok(SaleRow { id: r.get(0)?, customer_id: r.get(1)?, date: r.get(2)?, terms: r.get(3)?, total_minor: r.get(4)?, outstanding_minor: r.get(5)? })
+        Ok(SaleRow { id: r.get(0)?, event_id: r.get(1)?, customer_id: r.get(2)?, date: r.get(3)?, terms: r.get(4)?, total_minor: r.get(5)?, outstanding_minor: r.get(6)? })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
@@ -276,6 +314,7 @@ pub fn list_sales(state: State<AppState>) -> Result<Vec<SaleRow>, AppError> {
 #[derive(Serialize)]
 pub struct PurchaseRow {
     pub id: String,
+    pub event_id: String,
     pub supplier_id: Option<String>,
     pub date: String,
     pub terms: String,
@@ -287,9 +326,33 @@ pub struct PurchaseRow {
 pub fn list_purchases(state: State<AppState>) -> Result<Vec<PurchaseRow>, AppError> {
     let db = state.db.lock().unwrap();
     let mut stmt = db.conn.prepare(
-        "SELECT id, supplier_id, date, terms, total_minor, outstanding_minor FROM purchases WHERE reversed = 0 ORDER BY date DESC")?;
+        "SELECT id, event_id, supplier_id, date, terms, total_minor, outstanding_minor FROM purchases WHERE reversed = 0 ORDER BY date DESC")?;
     let rows = stmt.query_map([], |r| {
-        Ok(PurchaseRow { id: r.get(0)?, supplier_id: r.get(1)?, date: r.get(2)?, terms: r.get(3)?, total_minor: r.get(4)?, outstanding_minor: r.get(5)? })
+        Ok(PurchaseRow { id: r.get(0)?, event_id: r.get(1)?, supplier_id: r.get(2)?, date: r.get(3)?, terms: r.get(4)?, total_minor: r.get(5)?, outstanding_minor: r.get(6)? })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+#[derive(Serialize)]
+pub struct PaymentRow {
+    pub id: String,
+    pub event_id: String,
+    pub party_id: String,
+    pub direction: String,
+    pub amount_minor: i64,
+    pub date: String,
+}
+
+#[tauri::command]
+pub fn list_payments(state: State<AppState>) -> Result<Vec<PaymentRow>, AppError> {
+    let db = state.db.lock().unwrap();
+    let mut stmt = db.conn.prepare(
+        "SELECT id, event_id, party_id, direction, amount_minor, date FROM payments ORDER BY date DESC")?;
+    let rows = stmt.query_map([], |r| {
+        Ok(PaymentRow {
+            id: r.get(0)?, event_id: r.get(1)?, party_id: r.get(2)?,
+            direction: r.get(3)?, amount_minor: r.get(4)?, date: r.get(5)?,
+        })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }

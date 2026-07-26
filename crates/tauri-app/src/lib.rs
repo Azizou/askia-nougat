@@ -69,6 +69,9 @@ pub fn run() {
             commands::list_purchases,
             commands::get_settings,
             commands::set_setting,
+            commands::record_payment_made,
+            commands::reverse_transaction,
+            commands::list_payments,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
