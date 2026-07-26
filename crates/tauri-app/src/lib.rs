@@ -2,7 +2,7 @@ mod commands;
 mod error;
 mod state;
 
-use accounting_core::{apply_schema, rebuild, Hlc, rehydrate_from_log, run_genesis};
+use accounting_core::{apply_schema, ensure_walkin_party, rebuild, Hlc, rehydrate_from_log, run_genesis};
 use state::AppState;
 use std::fs;
 use std::path::PathBuf;
@@ -31,6 +31,11 @@ fn init_state(app_data_dir: PathBuf) -> AppState {
     if event_count == 0 {
         run_genesis(&conn, &mut hlc, now_ms(), "device-1", "owner-1", "Owner").expect("genesis");
     }
+
+    // Idempotently ensure the shared walk-in customer exists (covers both
+    // fresh installs and installs whose genesis predates this party). Must run
+    // before rebuild so the event is projected this startup.
+    ensure_walkin_party(&conn, &mut hlc, now_ms(), "device-1").expect("seed walk-in party");
 
     // Always rebuild projections on startup — ensures genesis events are projected
     // and recovers from any interrupted prior session.
