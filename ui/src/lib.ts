@@ -1,8 +1,16 @@
-export function formatMoney(minor: number, locale?: string): string {
-  return (minor / 100).toLocaleString(locale ?? undefined, {
-    minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
+export interface Currency {
+  symbol: string;
+  decimals: number;
+}
+
+export function formatMoney(minor: number, currency?: Currency, locale?: string): string {
+  const decimals = currency?.decimals ?? 0;
+  const num = (minor / 100).toLocaleString(locale ?? undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals,
   });
+  const symbol = currency?.symbol ?? "";
+  return symbol ? `${symbol} ${num}` : num;
 }
 
 export function majorToMinor(major: string): number {
