@@ -141,6 +141,20 @@ pub fn record_payment(state: State<AppState>, input: PaymentInput) -> Result<(),
     })
 }
 
+// ---- Settings commands ----
+
+#[tauri::command]
+pub fn get_settings(state: State<AppState>) -> Result<std::collections::HashMap<String, String>, AppError> {
+    let db = state.db.lock().unwrap();
+    accounting_core::get_settings(&db.conn).map_err(AppError::from)
+}
+
+#[tauri::command]
+pub fn set_setting(state: State<AppState>, key: String, value: String) -> Result<(), AppError> {
+    let db = state.db.lock().unwrap();
+    accounting_core::set_setting(&db.conn, &key, &value).map_err(AppError::from)
+}
+
 // ---- Query commands ----
 
 #[derive(Serialize)]
