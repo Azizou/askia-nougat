@@ -5,12 +5,13 @@ import { Parties } from "./pages/Parties";
 import { Purchases } from "./pages/Purchases";
 import { Sales } from "./pages/Sales";
 import { Payments } from "./pages/Payments";
+import { Preferences } from "./pages/Preferences";
 import { Faq } from "./pages/Faq";
 import { useTheme } from "./theme";
 import { useI18n } from "./i18n";
 import { useSettings } from "./settings";
 
-type Page = "dashboard" | "items" | "parties" | "purchases" | "sales" | "payments" | "faq";
+type Page = "dashboard" | "items" | "parties" | "purchases" | "sales" | "payments" | "preferences" | "faq";
 
 const NAV_ICONS: Record<Page, string> = {
   dashboard: "📊",
@@ -19,10 +20,11 @@ const NAV_ICONS: Record<Page, string> = {
   purchases: "🛒",
   sales: "💰",
   payments: "💳",
+  preferences: "⚙️",
   faq: "❓",
 };
 
-const NAV_ORDER: Page[] = ["dashboard", "items", "parties", "purchases", "sales", "payments", "faq"];
+const NAV_ORDER: Page[] = ["dashboard", "items", "parties", "purchases", "sales", "payments", "preferences", "faq"];
 
 const SIDEBAR_KEY = "accounting.sidebar.collapsed";
 
@@ -31,8 +33,8 @@ function App() {
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     return window.localStorage.getItem(SIDEBAR_KEY) === "1";
   });
-  const { label, icon, cycle, set: setTheme } = useTheme();
-  const { t, localeLabel, cycleLocale, setLocale } = useI18n();
+  const { set: setTheme } = useTheme();
+  const { t, setLocale } = useI18n();
   const { settings, ready } = useSettings();
 
   useEffect(() => {
@@ -73,22 +75,6 @@ function App() {
         <div className="sidebar-footer">
           <button
             className="sidebar-footer-btn"
-            onClick={cycleLocale}
-            title={t.app.switchLocale}
-          >
-            <span className="nav-icon">🌐</span>
-            <span className="nav-label">{localeLabel}</span>
-          </button>
-          <button
-            className="sidebar-footer-btn"
-            onClick={cycle}
-            title={t.app.cycleTheme}
-          >
-            <span className="nav-icon">{icon}</span>
-            <span className="nav-label">{label}</span>
-          </button>
-          <button
-            className="sidebar-footer-btn"
             onClick={() => setCollapsed((c) => !c)}
             title={t.app.toggleSidebar}
           >
@@ -105,6 +91,7 @@ function App() {
         {page === "purchases" && <Purchases />}
         {page === "sales" && <Sales />}
         {page === "payments" && <Payments />}
+        {page === "preferences" && <Preferences />}
         {page === "faq" && <Faq />}
       </main>
 
