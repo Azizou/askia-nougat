@@ -87,6 +87,6 @@ export function useCurrency() {
   };
   return {
     currency,
-    format: (minor: number) => formatMoney(minor, currency),
+    format: (minor: number) => formatMoney(minor, currency, settings.locale),
   };
 }

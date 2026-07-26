@@ -121,6 +121,7 @@ export const fr = {
     title: "Paiements",
     addNew: "Nouveau paiement",
     recordTitle: "Enregistrer un paiement",
+    direction: "Type",
     customer: "Client",
     amount: "Montant",
     date: "Date",

@@ -123,6 +123,7 @@ export const en: Translations = {
     title: "Payments",
     addNew: "New Payment",
     recordTitle: "Record Payment",
+    direction: "Type",
     customer: "Customer",
     amount: "Amount",
     date: "Date",

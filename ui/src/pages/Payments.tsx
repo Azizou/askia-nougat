@@ -106,7 +106,7 @@ export function Payments() {
         <form onSubmit={submit} className="form">
           <div className="form-row">
             <label>
-              {t.payments.recordTitle}
+              {t.payments.direction}
               <select value={direction} onChange={(e) => { setDirection(e.target.value as Direction); setPartyId(""); }}>
                 <option value="in">{t.payments.directionReceived}</option>
                 <option value="out">{t.payments.directionPaid}</option>
@@ -157,7 +157,7 @@ export function Payments() {
               <tr>
                 <th>{t.payments.date}</th>
                 <th>{t.parties.title}</th>
-                <th>{t.payments.recordTitle}</th>
+                <th>{t.payments.direction}</th>
                 <th className="num">{t.payments.amount}</th>
                 <th>{t.common.actions}</th>
               </tr>
