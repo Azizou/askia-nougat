@@ -71,7 +71,7 @@ mod tests {
             "journal_lines", "sales", "sale_lines", "lot_consumptions",
             "purchases", "purchase_lines", "payments", "payment_allocations",
             "party_balances", "returns", "return_lines", "expenses",
-            "events", "projection_cursor",
+            "events", "projection_cursor", "app_settings",
         ];
         for name in expected {
             let count: i64 = conn

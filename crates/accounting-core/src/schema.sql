@@ -19,6 +19,15 @@ CREATE TABLE IF NOT EXISTS projection_cursor (
 );
 
 -- ============================================================
+-- Application settings (NOT event-sourced; ignored by rebuild).
+-- Holds current-state UI/business configuration, not ledger facts.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS app_settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+-- ============================================================
 -- Master data projections (spec §5)
 -- ============================================================
 
