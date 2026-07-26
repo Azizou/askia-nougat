@@ -6,6 +6,7 @@ pub mod projectors;
 pub mod commands;
 pub mod reconciliation;
 pub mod queries;
+pub mod settings;
 #[cfg(test)]
 mod test_support;
 
@@ -33,3 +34,4 @@ pub use queries::{
     AgeAtSale, AgingBucket, AgingInvoice, BalanceSheet, GrossProfit, ItemMargin, LotAge,
     MonthlyUnits, PartyBalance, ProfitAndLoss, ReturnRate, SellerRow, StockOnHand,
 };
+pub use settings::{get_settings, set_setting, SETTING_KEYS};
