@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { formatMoney, majorToMinor, newId, today , errorMessage } from "../lib";
+import { majorToMinor, newId, today , errorMessage } from "../lib";
 import { useToast } from "../theme";
 import { useI18n } from "../i18n";
+import { useCurrency } from "../settings";
 
 type Terms = "cash" | "credit";
 
@@ -21,6 +22,7 @@ interface Item {
 
 interface Purchase {
   id: string;
+  event_id: string;
   supplier_id: string;
   date: string;
   terms: Terms;
@@ -38,6 +40,7 @@ const emptyLine = (): LineDraft => ({ item_id: "", qty: "", unit_cost_major: "" 
 
 export function Purchases() {
   const { t } = useI18n();
+  const { format } = useCurrency();
   const [purchases, setPurchases] = useState<Purchase[]>([]);
   const [parties, setParties] = useState<Party[]>([]);
   const [items, setItems] = useState<Item[]>([]);
@@ -121,6 +124,18 @@ export function Purchases() {
       toast.push(errorMessage(e), "error");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const voidPurchase = async (p: Purchase) => {
+    const reason = window.prompt(t.common.voidConfirm);
+    if (!reason) return;
+    try {
+      await invoke("reverse_transaction", { input: { target_event_id: p.event_id, reason } });
+      toast.push(t.common.voided);
+      await refresh();
+    } catch (e: unknown) {
+      toast.push(errorMessage(e), "error");
     }
   };
 
@@ -272,6 +287,7 @@ export function Purchases() {
                 <th>{t.purchases.terms}</th>
                 <th className="num">{t.purchases.total}</th>
                 <th className="num">{t.purchases.outstanding}</th>
+                <th>{t.common.actions}</th>
               </tr>
             </thead>
             <tbody>
@@ -284,15 +300,20 @@ export function Purchases() {
                       {termsLabel(p.terms)}
                     </span>
                   </td>
-                  <td className="num">{formatMoney(p.total_minor)}</td>
+                  <td className="num">{format(p.total_minor)}</td>
                   <td className="num">
                     <span
                       className={
                         p.outstanding_minor > 0 ? "warn" : "ok"
                       }
                     >
-                      {formatMoney(p.outstanding_minor)}
+                      {format(p.outstanding_minor)}
                     </span>
+                  </td>
+                  <td>
+                    <button className="ghost" onClick={() => voidPurchase(p)}>
+                      {t.common.void}
+                    </button>
                   </td>
                 </tr>
               ))}
