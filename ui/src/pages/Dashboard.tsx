@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { formatMoney, today , errorMessage } from "../lib";
+import { today , errorMessage } from "../lib";
 import { useI18n } from "../i18n";
+import { useCurrency } from "../settings";
 
 interface DashboardData {
   inventory_value: number;
@@ -33,6 +34,7 @@ type SortKey = "item" | "qty";
 
 export function Dashboard() {
   const { t } = useI18n();
+  const { format } = useCurrency();
   const [dashboard, setDashboard] = useState<DashboardData | null>(null);
   const [stock, setStock] = useState<StockRow[]>([]);
   const [profit, setProfit] = useState<ProfitData | null>(null);
@@ -102,19 +104,19 @@ export function Dashboard() {
         <div className="kpi-grid">
           <div className="kpi-card">
             <div className="kpi-label">{t.dashboard.inventoryValue}</div>
-            <div className="kpi-value">{formatMoney(dashboard.inventory_value)}</div>
+            <div className="kpi-value">{format(dashboard.inventory_value)}</div>
             <div className="kpi-sub">{t.dashboard.inventorySub}</div>
           </div>
           <div className="kpi-card success">
             <div className="kpi-label">{t.dashboard.accountsReceivable}</div>
             <div className="kpi-value success">
-              {formatMoney(dashboard.total_receivable)}
+              {format(dashboard.total_receivable)}
             </div>
             <div className="kpi-sub">{t.dashboard.receivableSub}</div>
           </div>
           <div className="kpi-card warning">
             <div className="kpi-label">{t.dashboard.accountsPayable}</div>
-            <div className="kpi-value warning">{formatMoney(dashboard.total_payable)}</div>
+            <div className="kpi-value warning">{format(dashboard.total_payable)}</div>
             <div className="kpi-sub">{t.dashboard.payableSub}</div>
           </div>
           <div className={`kpi-card ${dashboard.checks_passing ? "success" : "danger"}`}>
@@ -139,11 +141,11 @@ export function Dashboard() {
           <div className="profit-row">
             <div className="profit-cell">
               <div className="profit-label">{t.dashboard.revenue}</div>
-              <div className="profit-value">{formatMoney(profit.revenue_minor)}</div>
+              <div className="profit-value">{format(profit.revenue_minor)}</div>
             </div>
             <div className="profit-cell">
               <div className="profit-label">{t.dashboard.cogs}</div>
-              <div className="profit-value">{formatMoney(profit.cogs_minor)}</div>
+              <div className="profit-value">{format(profit.cogs_minor)}</div>
             </div>
             <div className="profit-cell">
               <div className="profit-label">{t.dashboard.grossProfit}</div>
@@ -152,7 +154,7 @@ export function Dashboard() {
                   profit.gross_profit_minor >= 0 ? "success" : "danger"
                 }`}
               >
-                {formatMoney(profit.gross_profit_minor)}
+                {format(profit.gross_profit_minor)}
               </div>
             </div>
             <div className="profit-cell">
@@ -162,7 +164,7 @@ export function Dashboard() {
                   profit.net_profit_minor >= 0 ? "success" : "danger"
                 }`}
               >
-                {formatMoney(profit.net_profit_minor)}
+                {format(profit.net_profit_minor)}
               </div>
             </div>
           </div>
