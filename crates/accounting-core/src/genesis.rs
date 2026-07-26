@@ -6,6 +6,10 @@ use serde_json::json;
 /// The reserved system-user id used to author genesis events.
 pub const SYSTEM_USER_ID: &str = "system";
 
+/// The shared, always-present customer used to record cash sales to unknown
+/// walk-in buyers.
+pub const WALKIN_PARTY_ID: &str = "party_walkin";
+
 /// Seeded chart of accounts: (system_role, display name, type, normal side).
 const SEEDED_ACCOUNTS: &[(&str, &str, &str, &str)] = &[
     ("cash",                "Cash",                     "asset",     "debit"),
@@ -63,6 +67,35 @@ pub fn run_genesis(
     Ok(())
 }
 
+/// Idempotently ensure the walk-in customer party exists.
+///
+/// Safe to call on every startup: it checks the immutable event log (not the
+/// `parties` projection, which is empty until `rebuild()` runs) and only
+/// appends a `PartyCreated` event when none exists yet. Covers installs whose
+/// genesis predates the walk-in party.
+pub fn ensure_walkin_party(
+    conn: &Connection,
+    hlc: &mut Hlc,
+    physical_now: u64,
+    device_id: &str,
+) -> rusqlite::Result<()> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events WHERE type = 'PartyCreated' \
+         AND json_extract(payload, '$.partyId') = ?1",
+        [WALKIN_PARTY_ID],
+        |r| r.get(0),
+    )?;
+    if exists > 0 {
+        return Ok(());
+    }
+    append_event(
+        conn, hlc, physical_now, device_id, SYSTEM_USER_ID,
+        "PartyCreated",
+        &json!({ "partyId": WALKIN_PARTY_ID, "name": "Walk-in Customer", "kind": "customer" }),
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,5 +150,38 @@ mod tests {
         let count_after_second: i64 =
             conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
         assert_eq!(count_after_first, count_after_second, "log must be unchanged");
+    }
+
+    #[test]
+    fn ensure_walkin_seeds_once_and_is_idempotent() {
+        let conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("deviceA");
+        run_genesis(&conn, &mut hlc, 1000, "deviceA", "owner-1", "Jane").unwrap();
+
+        ensure_walkin_party(&conn, &mut hlc, 2000, "deviceA").unwrap();
+        ensure_walkin_party(&conn, &mut hlc, 3000, "deviceA").unwrap();
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE type='PartyCreated' \
+                 AND json_extract(payload, '$.partyId') = ?1",
+                [WALKIN_PARTY_ID],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "walk-in party must be seeded exactly once");
+    }
+
+    #[test]
+    fn ensure_walkin_projects_a_customer_party() {
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("deviceA");
+        run_genesis(&conn, &mut hlc, 1000, "deviceA", "owner-1", "Jane").unwrap();
+        ensure_walkin_party(&conn, &mut hlc, 2000, "deviceA").unwrap();
+        crate::projectors::rebuild(&mut conn).unwrap();
+        let kind: String = conn
+            .query_row("SELECT kind FROM parties WHERE id = ?1", [WALKIN_PARTY_ID], |r| r.get(0))
+            .unwrap();
+        assert_eq!(kind, "customer");
     }
 }
