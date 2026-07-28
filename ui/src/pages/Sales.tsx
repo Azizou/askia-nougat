@@ -1,13 +1,11 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { majorToMinor, newId, today , errorMessage } from "../lib";
+import { majorToMinor, newId, today , errorMessage, displayPartyName, WALKIN_PARTY_ID } from "../lib";
 import { useToast } from "../theme";
 import { useI18n } from "../i18n";
 import { useCurrency } from "../settings";
 
 type Terms = "cash" | "credit";
-
-const WALKIN_PARTY_ID = "party_walkin";
 
 interface Party {
   id: string;
@@ -145,7 +143,8 @@ export function Sales() {
     }
   };
 
-  const customerName = (id: string) => parties.find((p) => p.id === id)?.name ?? id;
+  const customerName = (id: string) =>
+    displayPartyName(id, parties.find((p) => p.id === id)?.name ?? id, t.parties.walkinCustomer);
   const termsLabel = (val: Terms) => (val === "cash" ? t.sales.cash : t.sales.credit);
 
   return (
@@ -182,7 +181,7 @@ export function Sales() {
                   <option value="">{t.sales.selectCustomer}</option>
                   {customers.map((p) => (
                     <option key={p.id} value={p.id}>
-                      {p.name}
+                      {displayPartyName(p.id, p.name, t.parties.walkinCustomer)}
                     </option>
                   ))}
                 </select>

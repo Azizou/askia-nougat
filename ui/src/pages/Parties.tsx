@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { newId , errorMessage } from "../lib";
+import { newId , errorMessage, displayPartyName } from "../lib";
 import { useToast } from "../theme";
 import { useI18n } from "../i18n";
 
@@ -160,7 +160,7 @@ export function Parties() {
             <tbody>
               {parties.map((p) => (
                 <tr key={p.id}>
-                  <td>{p.name}</td>
+                  <td>{displayPartyName(p.id, p.name, t.parties.walkinCustomer)}</td>
                   <td>
                     <span className={`badge ${kindClass(p.kind)}`}>{kindLabel(p.kind)}</span>
                   </td>

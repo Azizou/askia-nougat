@@ -66,6 +66,7 @@ export const fr = {
     added: "Tiers ajouté avec succès.",
     close: "Fermer",
     addTooltip: "Ajouter un tiers",
+    walkinCustomer: "Client de passage",
   },
   purchases: {
     title: "Achats",

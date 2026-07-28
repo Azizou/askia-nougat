@@ -68,6 +68,7 @@ export const en: Translations = {
     added: "Party added successfully.",
     close: "Close",
     addTooltip: "Add party",
+    walkinCustomer: "Walk-in Customer",
   },
   purchases: {
     title: "Purchases",

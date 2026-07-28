@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { majorToMinor, newId, today, errorMessage } from "../lib";
+import { majorToMinor, newId, today, errorMessage, displayPartyName } from "../lib";
 import { useToast } from "../theme";
 import { useI18n } from "../i18n";
 import { useCurrency } from "../settings";
@@ -57,7 +57,8 @@ export function Payments() {
       ? parties.filter((p) => p.kind === "customer" || p.kind === "both")
       : parties.filter((p) => p.kind === "supplier" || p.kind === "both");
 
-  const partyName = (id: string) => parties.find((p) => p.id === id)?.name ?? id;
+  const partyName = (id: string) =>
+    displayPartyName(id, parties.find((p) => p.id === id)?.name ?? id, t.parties.walkinCustomer);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -119,7 +120,7 @@ export function Payments() {
                   {direction === "in" ? t.payments.selectCustomer : t.payments.selectSupplier}
                 </option>
                 {eligible.map((p) => (
-                  <option key={p.id} value={p.id}>{p.name}</option>
+                  <option key={p.id} value={p.id}>{displayPartyName(p.id, p.name, t.parties.walkinCustomer)}</option>
                 ))}
               </select>
             </label>
