@@ -258,4 +258,56 @@ which is a build-toolchain change outside the scope the user approved for this f
 It is also a dev-dependency-only exposure for a desktop app that serves no untrusted
 source maps. Raised to the user as a finding instead.
 
+## D13. Critical: restoring the live ledger onto itself destroyed it (fixed, `1457b8f`)
+
+Found by me during Task 13, not by any reviewer, and not in the plan.
+
+**The bug.** The restore file dialog lets the user pick `ledger.db` — the database
+they are using right now. `validate_candidate` accepts it, correctly: it genuinely
+is a valid SQLite file with a populated `events` table. Then `swap_in_place` calls
+`fs::copy(live, live)`, which **truncates the file to zero bytes and returns
+`Ok(0)`** (unlike Python's `shutil.copyfile`, which raises `SameFileError`), and the
+mandatory `-wal`/`-shm` deletion immediately afterwards throws away the only
+remaining copy of everything not yet checkpointed. Reproduced end to end against a
+2334-event WAL ledger:
+
+```
+events before      : 2334
+main .db bytes     : 4386816
+validate_candidate : ACCEPTED the live database as a restore source
+main .db bytes     : 0            <-- after swap_in_place(live, live)
+-wal still there?  : false
+events after       : UNREADABLE — no such table: events
+```
+
+Worse than loud loss: a 0-byte file passes `PRAGMA integrity_check` as `"ok"`, so
+the next launch opens a silently empty ledger. And this install's real data lives
+almost entirely in the WAL — the user's live ledger was a 4 KB `.db` with a 1.8 MB
+`-wal` — so the sidecar deletion is where the data actually goes.
+
+**The fix.** `swap_in_place` refuses when candidate and live resolve to the same
+file. Identity is decided by `canonicalize` (so `dir/sub/../ledger.db` is caught)
+and, on Unix, by device/inode (so two hard links to one file are caught — paths
+that canonicalize differently yet share storage, where a copy still clobbers the
+source). Two tests written first and confirmed failing: `tauri-app` 14 → 16.
+
+**Secondary defect found while fixing it.** `restore_database` sets `db.conn = None`
+*before* `swap_in_place`. A rejection from inside the swap would therefore leave the
+app in the "Restore finished. Please close and reopen the app." state over a
+recoverable misclick. So the user-facing rejection was moved ahead of the drop, and
+the guard in `swap_in_place` stays as a last line of defence for any future caller.
+General rule this encodes: **everything that can reject must reject before the live
+connection is dropped.**
+
+**Third instance of the same class** (D7, D9, now this): a comment asserting an
+invariant the code does not enforce. `restore_database`'s doc says "a restore must
+always be undoable" and the safety copy exists to make that true — but the
+self-restore path destroyed the source before that promise could apply. The pattern
+is now reliable enough to be worth grepping for deliberately rather than hoping a
+reviewer notices.
+
+**Deviation from the plan, accepted:** the plan has no such guard, in any task. The
+plan's `swap_in_place` is exactly what shipped up to `1457b8f`. Shipping known
+silent total data loss to satisfy plan fidelity is not a trade worth making.
+
 <!-- Entries appended below as decisions are made. -->
