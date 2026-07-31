@@ -524,8 +524,6 @@ pub fn import_event_log(
         let conn = db.conn()?;
         crate::backup::snapshot_to(conn, &rescue_path)?;
     }
-    let _ = crate::backup::prune(&rescue, crate::backup::RESCUE_PREFIX, crate::backup::KEEP_AUTO);
-
     let file = std::fs::File::open(&src_path)?;
     let reader = std::io::BufReader::new(file);
 
@@ -539,6 +537,13 @@ pub fn import_event_log(
     // appends next sort after the imported ones. rehydrate_from_log reads
     // MAX(hlc) and calls Hlc::observe — exactly what is needed here.
     accounting_core::rehydrate_from_log(conn, hlc, now_ms())?;
+
+    // Prune AFTER the source has been read, for the same reason as `restore_database`:
+    // never delete files out from under a path the caller supplied. The UI's import
+    // dialog filters `.jsonl` while `prune` only matches `.db`, so `src_path` cannot
+    // be a prune target today — but relying on that would leave the two commands
+    // disagreeing about an invariant, and a filter change would make it live.
+    let _ = crate::backup::prune(&rescue, crate::backup::RESCUE_PREFIX, crate::backup::KEEP_AUTO);
 
     Ok(ImportResult {
         inserted: summary.inserted,
