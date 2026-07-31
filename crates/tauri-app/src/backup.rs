@@ -163,6 +163,18 @@ pub fn swap_in_place(candidate: &Path, live: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Where safety copies live: `<app data>/accounting/rescue`.
+pub fn rescue_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("rescue")
+}
+
+/// Create the rescue directory if absent and return it.
+pub fn ensure_rescue_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
+    let dir = rescue_dir(data_dir);
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,6 +373,19 @@ mod tests {
         let restored = Connection::open(&live).unwrap();
         let n: i64 = restored.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 2, "the live file must now be the candidate");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rescue_dir_is_created_on_demand() {
+        let dir = temp_dir("rescue");
+        let rescue = rescue_dir(&dir);
+        assert!(!rescue.exists(), "should not exist yet");
+        let made = ensure_rescue_dir(&dir).unwrap();
+        assert!(made.exists() && made.is_dir());
+        assert_eq!(made, rescue);
+        // Idempotent.
+        ensure_rescue_dir(&dir).unwrap();
         let _ = fs::remove_dir_all(&dir);
     }
 }
