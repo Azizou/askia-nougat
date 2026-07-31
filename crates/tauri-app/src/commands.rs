@@ -19,6 +19,9 @@ macro_rules! with_ctx {
         let device_id = $state.device_id.clone();
         let mut db = $state.db.lock().unwrap();
         let crate::state::Db { ref mut conn, ref mut hlc } = *db;
+        let conn = conn.as_mut().ok_or_else(|| crate::error::AppError {
+            message: "Restore finished. Please close and reopen the app.".into(),
+        })?;
         let mut $ctx = CommandContext {
             conn, hlc, physical_now: now_ms(),
             device_id, user_id: "owner-1".into(),
@@ -148,13 +151,13 @@ pub fn record_payment(state: State<AppState>, input: PaymentInput) -> Result<(),
 #[tauri::command]
 pub fn get_settings(state: State<AppState>) -> Result<std::collections::HashMap<String, String>, AppError> {
     let db = state.db.lock().unwrap();
-    accounting_core::get_settings(&db.conn).map_err(AppError::from)
+    accounting_core::get_settings(db.conn()?).map_err(AppError::from)
 }
 
 #[tauri::command]
 pub fn set_setting(state: State<AppState>, key: String, value: String) -> Result<(), AppError> {
     let db = state.db.lock().unwrap();
-    accounting_core::set_setting(&db.conn, &key, &value).map_err(AppError::from)
+    accounting_core::set_setting(db.conn()?, &key, &value).map_err(AppError::from)
 }
 
 // ---- Supplier payment + reversal commands ----
@@ -206,11 +209,11 @@ pub struct DashboardData {
 #[tauri::command]
 pub fn get_dashboard(state: State<AppState>) -> Result<DashboardData, AppError> {
     let db = state.db.lock().unwrap();
-    let inv_val = accounting_core::inventory_valuation(&db.conn)?;
-    let balances = accounting_core::party_balances(&db.conn)?;
+    let inv_val = accounting_core::inventory_valuation(db.conn()?)?;
+    let balances = accounting_core::party_balances(db.conn()?)?;
     let recv: i64 = balances.iter().map(|b| b.receivable_minor).sum();
     let pay: i64 = balances.iter().map(|b| b.payable_minor).sum();
-    let checks = run_all_checks(&db.conn)?;
+    let checks = run_all_checks(db.conn()?)?;
     Ok(DashboardData {
         inventory_value: inv_val,
         total_receivable: recv,
@@ -228,7 +231,7 @@ pub struct StockRow {
 #[tauri::command]
 pub fn get_stock(state: State<AppState>) -> Result<Vec<StockRow>, AppError> {
     let db = state.db.lock().unwrap();
-    let stock = accounting_core::stock_on_hand(&db.conn)?;
+    let stock = accounting_core::stock_on_hand(db.conn()?)?;
     Ok(stock.into_iter().map(|s| StockRow { item_id: s.item_id, qty: s.qty }).collect())
 }
 
@@ -243,8 +246,8 @@ pub struct ProfitData {
 #[tauri::command]
 pub fn get_profit(state: State<AppState>, anchor: String) -> Result<ProfitData, AppError> {
     let db = state.db.lock().unwrap();
-    let g = accounting_core::gross_profit(&db.conn, &anchor)?;
-    let net = accounting_core::net_profit(&db.conn, &anchor)?;
+    let g = accounting_core::gross_profit(db.conn()?, &anchor)?;
+    let net = accounting_core::net_profit(db.conn()?, &anchor)?;
     Ok(ProfitData {
         revenue_minor: g.revenue_minor,
         cogs_minor: g.cogs_minor,
@@ -264,7 +267,7 @@ pub struct ItemRow {
 #[tauri::command]
 pub fn list_items(state: State<AppState>) -> Result<Vec<ItemRow>, AppError> {
     let db = state.db.lock().unwrap();
-    let mut stmt = db.conn.prepare(
+    let mut stmt = db.conn()?.prepare(
         "SELECT id, name, sku, unit FROM items ORDER BY name")?;
     let rows = stmt.query_map([], |r| {
         Ok(ItemRow { id: r.get(0)?, name: r.get(1)?, sku: r.get(2)?, unit: r.get(3)? })
@@ -282,7 +285,7 @@ pub struct PartyRow {
 #[tauri::command]
 pub fn list_parties(state: State<AppState>) -> Result<Vec<PartyRow>, AppError> {
     let db = state.db.lock().unwrap();
-    let mut stmt = db.conn.prepare(
+    let mut stmt = db.conn()?.prepare(
         "SELECT id, name, kind FROM parties ORDER BY name")?;
     let rows = stmt.query_map([], |r| {
         Ok(PartyRow { id: r.get(0)?, name: r.get(1)?, kind: r.get(2)? })
@@ -304,7 +307,7 @@ pub struct SaleRow {
 #[tauri::command]
 pub fn list_sales(state: State<AppState>) -> Result<Vec<SaleRow>, AppError> {
     let db = state.db.lock().unwrap();
-    let mut stmt = db.conn.prepare(
+    let mut stmt = db.conn()?.prepare(
         "SELECT id, event_id, customer_id, date, terms, total_minor, outstanding_minor FROM sales WHERE reversed = 0 ORDER BY date DESC")?;
     let rows = stmt.query_map([], |r| {
         Ok(SaleRow { id: r.get(0)?, event_id: r.get(1)?, customer_id: r.get(2)?, date: r.get(3)?, terms: r.get(4)?, total_minor: r.get(5)?, outstanding_minor: r.get(6)? })
@@ -326,7 +329,7 @@ pub struct PurchaseRow {
 #[tauri::command]
 pub fn list_purchases(state: State<AppState>) -> Result<Vec<PurchaseRow>, AppError> {
     let db = state.db.lock().unwrap();
-    let mut stmt = db.conn.prepare(
+    let mut stmt = db.conn()?.prepare(
         "SELECT id, event_id, supplier_id, date, terms, total_minor, outstanding_minor FROM purchases WHERE reversed = 0 ORDER BY date DESC")?;
     let rows = stmt.query_map([], |r| {
         Ok(PurchaseRow { id: r.get(0)?, event_id: r.get(1)?, supplier_id: r.get(2)?, date: r.get(3)?, terms: r.get(4)?, total_minor: r.get(5)?, outstanding_minor: r.get(6)? })
@@ -347,7 +350,7 @@ pub struct PaymentRow {
 #[tauri::command]
 pub fn list_payments(state: State<AppState>) -> Result<Vec<PaymentRow>, AppError> {
     let db = state.db.lock().unwrap();
-    let mut stmt = db.conn.prepare(
+    let mut stmt = db.conn()?.prepare(
         "SELECT id, event_id, party_id, direction, amount_minor, date FROM payments ORDER BY date DESC")?;
     let rows = stmt.query_map([], |r| {
         Ok(PaymentRow {

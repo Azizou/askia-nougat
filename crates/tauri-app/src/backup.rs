@@ -89,6 +89,80 @@ pub fn prune(dir: &Path, prefix: &str, keep: usize) -> std::io::Result<Vec<PathB
     Ok(removed)
 }
 
+/// Why a candidate file cannot be restored.
+#[derive(Debug)]
+pub struct InvalidCandidate(pub String);
+
+impl std::fmt::Display for InvalidCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for InvalidCandidate {}
+
+/// Check a candidate backup **before** the live database is touched.
+///
+/// Requires: the file exists, opens as SQLite, passes `integrity_check`, has an
+/// `events` table, and holds at least one event. Opened read-only so validation
+/// can never modify the candidate.
+pub fn validate_candidate(path: &Path) -> Result<(), InvalidCandidate> {
+    if !path.exists() {
+        return Err(InvalidCandidate("the file no longer exists".into()));
+    }
+
+    let uri = format!("file:{}?mode=ro", path.to_string_lossy());
+    let conn = Connection::open_with_flags(
+        &uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| InvalidCandidate(format!("this file is not a valid backup ({e})")))?;
+
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .map_err(|e| InvalidCandidate(format!("this file is not a valid backup ({e})")))?;
+    if integrity != "ok" {
+        return Err(InvalidCandidate(format!("this backup is damaged ({integrity})")));
+    }
+
+    let has_events: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| InvalidCandidate(format!("this file is not a valid backup ({e})")))?;
+    if has_events == 0 {
+        return Err(InvalidCandidate("this file is not an accounting backup".into()));
+    }
+
+    let events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+        .map_err(|e| InvalidCandidate(format!("this backup cannot be read ({e})")))?;
+    if events == 0 {
+        return Err(InvalidCandidate("this backup contains no records".into()));
+    }
+
+    Ok(())
+}
+
+/// Replace `live` with `candidate` and delete the stale WAL sidecars.
+///
+/// The caller MUST have dropped every connection to `live` first.
+///
+/// Deleting `-wal` / `-shm` is mandatory, not tidiness: they belong to the file
+/// being replaced. Left in place, SQLite may replay the OLD write-ahead log on
+/// top of the NEW database and corrupt it.
+pub fn swap_in_place(candidate: &Path, live: &Path) -> std::io::Result<()> {
+    fs::copy(candidate, live)?;
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{suffix}", live.to_string_lossy()));
+        if sidecar.exists() {
+            fs::remove_file(&sidecar)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,6 +262,105 @@ mod tests {
         let dir = temp_dir("prune-few");
         fs::write(dir.join(format!("{AUTO_PREFIX}20260101-000000.db")), b"x").unwrap();
         assert!(prune(&dir, AUTO_PREFIX, 3).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_accepts_a_real_snapshot() {
+        let dir = temp_dir("validate-ok");
+        let conn = Connection::open(dir.join("ledger.db")).unwrap();
+        apply_schema(&conn).unwrap();
+        let mut hlc = Hlc::new("devA");
+        append_event(&conn, &mut hlc, 1000, "devA", "u", "ItemDefined",
+            &serde_json::json!({"itemId": "i1"})).unwrap();
+        let snap = dir.join("snap.db");
+        snapshot_to(&conn, &snap).unwrap();
+
+        validate_candidate(&snap).expect("a real snapshot must validate");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_a_non_database() {
+        let dir = temp_dir("validate-junk");
+        let junk = dir.join("notes.db");
+        fs::write(&junk, b"this is not a sqlite file").unwrap();
+        assert!(validate_candidate(&junk).is_err(), "garbage must be rejected");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_a_database_with_no_events_table() {
+        let dir = temp_dir("validate-noevents");
+        let other = dir.join("other.db");
+        let c = Connection::open(&other).unwrap();
+        c.execute_batch("CREATE TABLE unrelated (x INTEGER)").unwrap();
+        drop(c);
+        assert!(validate_candidate(&other).is_err(), "a foreign database must be rejected");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_event_log() {
+        let dir = temp_dir("validate-empty");
+        let empty = dir.join("empty.db");
+        let c = Connection::open(&empty).unwrap();
+        apply_schema(&c).unwrap();
+        drop(c);
+        assert!(validate_candidate(&empty).is_err(), "a snapshot with no events is not a ledger");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_a_missing_file() {
+        let dir = temp_dir("validate-missing");
+        assert!(validate_candidate(&dir.join("nope.db")).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swap_replaces_the_file_and_removes_stale_wal_sidecars() {
+        let dir = temp_dir("swap");
+        let live = dir.join("ledger.db");
+        let wal = dir.join("ledger.db-wal");
+        let shm = dir.join("ledger.db-shm");
+
+        // A live WAL database with 1 event, plus stale sidecars on disk.
+        let conn = Connection::open(&live).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        apply_schema(&conn).unwrap();
+        let mut hlc = Hlc::new("devA");
+        append_event(&conn, &mut hlc, 1000, "devA", "u", "ItemDefined",
+            &serde_json::json!({"itemId": "old"})).unwrap();
+
+        // A candidate with 2 events.
+        let candidate = dir.join("candidate.db");
+        let c2 = Connection::open(&candidate).unwrap();
+        apply_schema(&c2).unwrap();
+        let mut hlc2 = Hlc::new("devB");
+        for i in 0..2 {
+            append_event(&c2, &mut hlc2, 1000 + i, "devB", "u", "ItemDefined",
+                &serde_json::json!({"itemId": format!("new{i}")})).unwrap();
+        }
+        drop(c2);
+
+        drop(conn); // release the live connection, as restore requires
+
+        // A clean close checkpoints and removes the sidecars, so recreate them:
+        // the case that matters is a crash or kill leaving a WAL behind, which
+        // is exactly when SQLite would try to replay it onto the new file.
+        fs::write(&wal, b"stale wal").unwrap();
+        fs::write(&shm, b"stale shm").unwrap();
+        assert!(wal.exists() && shm.exists(), "guard: sidecars must be present or this test proves nothing");
+
+        swap_in_place(&candidate, &live).unwrap();
+
+        assert!(!wal.exists(), "stale -wal must be deleted or SQLite may replay it onto the new file");
+        assert!(!shm.exists(), "stale -shm must be deleted");
+
+        let restored = Connection::open(&live).unwrap();
+        let n: i64 = restored.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 2, "the live file must now be the candidate");
         let _ = fs::remove_dir_all(&dir);
     }
 }
