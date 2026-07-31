@@ -152,7 +152,21 @@ pub fn validate_candidate(path: &Path) -> Result<(), InvalidCandidate> {
 /// Deleting `-wal` / `-shm` is mandatory, not tidiness: they belong to the file
 /// being replaced. Left in place, SQLite may replay the OLD write-ahead log on
 /// top of the NEW database and corrupt it.
+///
+/// Refuses a self-restore. The file dialog lets the user pick the live ledger
+/// itself, and it passes every `validate_candidate` check because it genuinely
+/// is a valid database — but `fs::copy(p, p)` truncates `p` to zero bytes and
+/// still returns `Ok`, and the sidecar deletion below would then throw away the
+/// only copy of anything not yet checkpointed. The guard lives here rather than
+/// only in validation because this is the call that destroys data.
 pub fn swap_in_place(candidate: &Path, live: &Path) -> std::io::Result<()> {
+    if is_same_file(candidate, live) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "this backup is the database you are using right now; \
+             choose a backup file instead",
+        ));
+    }
     fs::copy(candidate, live)?;
     for suffix in ["-wal", "-shm"] {
         let sidecar = PathBuf::from(format!("{}{suffix}", live.to_string_lossy()));
@@ -161,6 +175,32 @@ pub fn swap_in_place(candidate: &Path, live: &Path) -> std::io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether two paths name the same file on disk.
+///
+/// Compared by what the paths resolve to, not by spelling: `canonicalize`
+/// collapses `.`, `..` and symlinks, so `a/sub/../ledger.db` and `a/ledger.db`
+/// compare equal. On Unix the device/inode pair is checked as well, which also
+/// catches two hard links to one file — paths that canonicalize differently but
+/// share storage, where a copy would still clobber the source.
+pub fn is_same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) if ca == cb => return true,
+        // If either path cannot be resolved it does not yet exist, so it cannot
+        // be the live database; fall through to the inode check for hard links.
+        _ => {}
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(ma), Ok(mb)) = (fs::metadata(a), fs::metadata(b)) {
+            return ma.dev() == mb.dev() && ma.ino() == mb.ino();
+        }
+    }
+
+    false
 }
 
 /// Where safety copies live: `<app data>/accounting/rescue`.
@@ -373,6 +413,65 @@ mod tests {
         let restored = Connection::open(&live).unwrap();
         let n: i64 = restored.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 2, "the live file must now be the candidate");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swap_refuses_to_restore_a_file_onto_itself() {
+        // The user can pick the live ledger in the restore file dialog: it is a
+        // real database and passes every validate_candidate check. But
+        // fs::copy(p, p) truncates p to zero bytes and returns Ok(0), and the
+        // -wal deletion that follows then discards the only remaining copy of
+        // recent writes. That is total data loss from a plausible misclick.
+        let dir = temp_dir("swap-self");
+        let live = dir.join("ledger.db");
+
+        let conn = Connection::open(&live).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        apply_schema(&conn).unwrap();
+        let mut hlc = Hlc::new("devA");
+        append_event(&conn, &mut hlc, 1000, "devA", "u", "ItemDefined",
+            &serde_json::json!({"itemId": "keep-me"})).unwrap();
+        drop(conn);
+
+        let before = fs::metadata(&live).unwrap().len();
+        assert!(before > 0, "guard: the live file must have content");
+
+        let err = swap_in_place(&live, &live).expect_err("must refuse a self-restore");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+        assert_eq!(
+            fs::metadata(&live).unwrap().len(),
+            before,
+            "the live database must not be touched"
+        );
+        let reopened = Connection::open(&live).unwrap();
+        let n: i64 = reopened.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "the event must survive");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swap_detects_self_restore_through_a_different_path_spelling() {
+        // Same file reached as ".../sub/../ledger.db". A string comparison would
+        // miss this; identity must be decided by what the paths resolve to.
+        let dir = temp_dir("swap-self-alias");
+        let live = dir.join("ledger.db");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+
+        let conn = Connection::open(&live).unwrap();
+        apply_schema(&conn).unwrap();
+        let mut hlc = Hlc::new("devA");
+        append_event(&conn, &mut hlc, 1000, "devA", "u", "ItemDefined",
+            &serde_json::json!({"itemId": "keep-me"})).unwrap();
+        drop(conn);
+
+        let before = fs::metadata(&live).unwrap().len();
+        let aliased = dir.join("sub").join("..").join("ledger.db");
+
+        let err = swap_in_place(&aliased, &live).expect_err("must refuse an aliased self-restore");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(fs::metadata(&live).unwrap().len(), before, "must not be truncated");
         let _ = fs::remove_dir_all(&dir);
     }
 

@@ -426,6 +426,18 @@ pub fn restore_database(
         .join("accounting");
     let live = data_dir.join("ledger.db");
 
+    // Everything that can reject must reject before `db.conn` is dropped below:
+    // past that point the app is unusable until a restart, so failing there would
+    // brick the session over a recoverable mistake. `swap_in_place` re-checks
+    // this as a last line of defence, but the user-facing rejection belongs here.
+    if crate::backup::is_same_file(&candidate, &live) {
+        return Err(AppError {
+            message: "this backup is the database you are using right now; \
+                      choose a backup file instead"
+                .into(),
+        });
+    }
+
     let mut db = state.db.lock().unwrap();
     let now = now_ms() as i64;
 
