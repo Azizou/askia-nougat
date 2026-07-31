@@ -475,6 +475,57 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// Restore may use a rescue copy as its own source. `restore_database` must
+    /// therefore run `swap_in_place` before pruning the rescue directory: prune
+    /// (keep=3) removes the oldest matching `.db`, which is exactly that source.
+    /// This pins the hazard at the primitive level — prune-before-swap loses the
+    /// candidate; swap-before-prune preserves its content in `live`.
+    #[test]
+    fn pruning_before_the_swap_would_delete_the_restore_source() {
+        let dir = temp_dir("restore-from-rescue");
+        let rescue = dir.join("rescue");
+        fs::create_dir_all(&rescue).unwrap();
+
+        // Three rescue copies; the oldest carries a marker so we can prove which
+        // file's content lands in `live`.
+        for (i, stamp) in ["20260101-000000", "20260102-000000", "20260103-000000"]
+            .iter()
+            .enumerate()
+        {
+            let p = rescue.join(format!("{RESCUE_PREFIX}{stamp}.db"));
+            let c = Connection::open(&p).unwrap();
+            apply_schema(&c).unwrap();
+            let mut hlc = Hlc::new("devA");
+            append_event(&c, &mut hlc, 1000 + i as u64, "devA", "u", "ItemDefined",
+                &serde_json::json!({"itemId": stamp})).unwrap();
+        }
+
+        // The user restores from the OLDEST rescue copy.
+        let candidate = rescue.join(format!("{RESCUE_PREFIX}20260101-000000.db"));
+        let live = dir.join("ledger.db");
+        let c = Connection::open(&live).unwrap();
+        apply_schema(&c).unwrap();
+        drop(c);
+
+        // A fourth rescue copy is written (the pre-restore snapshot of `live`),
+        // so the directory now holds four — one over the keep limit.
+        let fresh = rescue.join(format!("{RESCUE_PREFIX}20260104-000000.db"));
+        fs::copy(&live, &fresh).unwrap();
+
+        // Correct order: swap first, then prune.
+        swap_in_place(&candidate, &live).unwrap();
+        prune(&rescue, RESCUE_PREFIX, KEEP_AUTO).unwrap();
+
+        // `live` must carry the oldest rescue copy's marker, even though that
+        // copy was the prune target.
+        let restored = Connection::open(&live).unwrap();
+        let marker: String = restored
+            .query_row("SELECT json_extract(payload, '$.itemId') FROM events LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(marker, "20260101-000000", "the chosen source's content must survive the swap");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn rescue_dir_is_created_on_demand() {
         let dir = temp_dir("rescue");
