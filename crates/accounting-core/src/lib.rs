@@ -34,4 +34,4 @@ pub use queries::{
     AgeAtSale, AgingBucket, AgingInvoice, BalanceSheet, GrossProfit, ItemMargin, LotAge,
     MonthlyUnits, PartyBalance, ProfitAndLoss, ReturnRate, SellerRow, StockOnHand,
 };
-pub use settings::{get_settings, set_setting, SETTING_KEYS};
+pub use settings::{ensure_device_id, get_settings, set_setting, SETTING_KEYS};
