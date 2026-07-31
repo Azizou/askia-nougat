@@ -49,10 +49,55 @@ fn init_state(app_data_dir: PathBuf) -> AppState {
     AppState::new(conn, hlc, device_id)
 }
 
+/// Write an automatic snapshot into the remembered backup folder, then prune.
+///
+/// Returns `Ok(false)` when there is nothing to do (no folder remembered yet).
+/// Never panics: this runs while the window is closing.
+fn auto_backup_on_close(state: &AppState) -> Result<bool, String> {
+    let db = state.db.lock().map_err(|_| "state lock poisoned".to_string())?;
+    let conn = match db.conn.as_ref() {
+        Some(c) => c,
+        None => return Ok(false), // a restore already closed it
+    };
+
+    let settings = accounting_core::get_settings(conn).map_err(|e| e.to_string())?;
+    let folder = match settings.get("backup_folder") {
+        Some(f) if !f.is_empty() => std::path::PathBuf::from(f),
+        _ => return Ok(false), // the user has never chosen a folder
+    };
+    if !folder.is_dir() {
+        return Err(format!("backup folder is unavailable: {}", folder.display()));
+    }
+
+    let now = now_ms() as i64;
+    let dest = folder.join(backup::snapshot_name(backup::AUTO_PREFIX, now));
+    backup::snapshot_to(conn, &dest).map_err(|e| e.to_string())?;
+    accounting_core::set_setting(conn, "last_backup_at", &now.to_string())
+        .map_err(|e| e.to_string())?;
+
+    // Drop the connection before pruning so nothing holds a file we may remove.
+    drop(db);
+    backup::prune(&folder, backup::AUTO_PREFIX, backup::KEEP_AUTO).map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                let state = window.state::<AppState>();
+                match auto_backup_on_close(&state) {
+                    Ok(true) => eprintln!("automatic backup written"),
+                    Ok(false) => {}
+                    // Deliberately swallowed: the window is already closing, so
+                    // there is nowhere to show this. Next launch shows a stale
+                    // "last backup" date instead.
+                    Err(e) => eprintln!("automatic backup failed: {e}"),
+                }
+            }
+        })
         .setup(|app| {
             let data_dir = app.path().app_local_data_dir()
                 .expect("failed to resolve app data dir");
