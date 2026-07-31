@@ -28,6 +28,12 @@ pub enum ArchiveError {
     /// An incoming event's `(device_id, seq)` is taken locally by a different
     /// event id. Unmergeable — both logs authored under the same identity.
     Collision { device_id: String, seq: i64 },
+    /// The archive and the local ledger were founded independently: each ran its
+    /// own `run_genesis`, so they are two different businesses. Detected and
+    /// refused *before* the transaction, unlike `Reconciliation` below — a merged
+    /// two-genesis log cannot be replayed at all (it would open two of every
+    /// system account), which would leave `rebuild` failing on every startup.
+    ForeignLedger,
     /// The merged ledger failed reconciliation.
     ///
     /// The events are **still committed** — the check necessarily runs after the
@@ -51,6 +57,12 @@ impl std::fmt::Display for ArchiveError {
                 "cannot merge: this backup was made by an older installation that shares \
                  an identity with yours (device {device_id}, entry {seq}). Restore a full \
                  database backup instead."
+            ),
+            ArchiveError::ForeignLedger => write!(
+                f,
+                "this event log belongs to a different business, so it cannot be merged \
+                 into yours. Nothing was changed. To open that ledger instead, restore \
+                 its full database backup."
             ),
             ArchiveError::Reconciliation(m) => {
                 write!(
@@ -235,6 +247,35 @@ pub fn parse_event(line: &str, line_no: usize) -> Result<LedgerEvent, ArchiveErr
 /// not silently change your currency or locale, and overwriting `device_id`
 /// would destroy this install's identity. Whole-install recovery (settings
 /// included) is what a database snapshot restore is for.
+/// The id of the founding event in a parsed archive, if it contains one.
+///
+/// Events arrive in HLC order and `run_genesis` authors the very first event of
+/// any ledger, so the earliest `UserRegistered` is the founding one. Matched by
+/// event type rather than by position: an archive may be a partial export that
+/// begins mid-history, and in that case there is nothing to compare.
+fn genesis_id(events: &[LedgerEvent]) -> Option<&str> {
+    events
+        .iter()
+        .find(|e| e.event_type == "UserRegistered")
+        .map(|e| e.id.as_str())
+}
+
+/// The id of the local ledger's founding event, or `None` on an empty log.
+///
+/// `MIN(id)` is `MIN(hlc)`: an event's id *is* its HLC stamp, zero-padded so
+/// lexical order is causal order. An empty log means a fresh install with
+/// nothing to conflict with, which is the primary restore case and must stay
+/// permitted.
+fn first_event_id(conn: &Connection) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        // The SQL column is `type`; `event_type` is the Rust field name.
+        "SELECT id FROM events WHERE type = 'UserRegistered' ORDER BY id LIMIT 1",
+        [],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
 pub fn import_jsonl(
     conn: &mut Connection,
     reader: impl BufRead,
@@ -258,6 +299,23 @@ pub fn import_jsonl(
         events.push(parse_event(&line, idx + 2)?); // +2: 1-based, header is line 1
     }
     let total_events = events.len();
+
+    // Refuse a log from a different business BEFORE opening the transaction.
+    //
+    // `run_genesis` is every ledger's first event and runs exactly once per
+    // business, so its event id identifies the business. Two installs of one
+    // business share it (the second is seeded from the first's snapshot); two
+    // independently founded ledgers do not. Merging the latter is not merely
+    // wrong, it is unrecoverable through the UI: replaying both genesis runs
+    // opens two of every system account and re-registers the owner, so `rebuild`
+    // fails on a unique index — and because startup rebuilds unconditionally,
+    // the app would never launch again, leaving no way to reach the safety copy.
+    // Hence this is the one merge failure that must be caught pre-commit.
+    if let (Some(incoming), Some(local)) = (genesis_id(&events), first_event_id(conn)?) {
+        if incoming != local {
+            return Err(ArchiveError::ForeignLedger);
+        }
+    }
 
     let tx = conn.transaction()?;
     let mut inserted = 0usize;
@@ -489,6 +547,48 @@ mod tests {
         }
         rebuild(&mut conn).unwrap();
         conn
+    }
+
+    /// A log from a different business must be refused BEFORE anything is
+    /// committed. Both installs ran their own `run_genesis`, so replaying the
+    /// merged log opens two of every system account and re-registers the owner —
+    /// `rebuild` then fails on a unique index forever. Because `init_state`
+    /// rebuilds on every startup and `expect`s success, committing first would
+    /// leave the app unable to launch, so the user could not even reach
+    /// Preferences to restore the safety copy.
+    #[test]
+    fn import_refuses_a_log_from_a_different_business_without_committing() {
+        let a = seeded_as("dev-A", &["a1"]);
+        let b = seeded_as("dev-B", &["b1"]); // independently founded
+        let archive = export_string(&b);
+
+        let mut target = a;
+        let before = event_count(&target);
+
+        let err = import_jsonl(&mut target, archive.as_bytes())
+            .expect_err("a foreign ledger must be refused");
+        assert!(
+            matches!(err, ArchiveError::ForeignLedger),
+            "expected ForeignLedger, got {err:?}"
+        );
+
+        assert_eq!(event_count(&target), before, "nothing may be committed");
+        // The decisive property: the app must still start.
+        rebuild(&mut target).expect("startup rebuild must still succeed after a refused import");
+    }
+
+    /// The guard must not reject the case the feature exists for: two installs
+    /// of one business, sharing a genesis, diverging afterwards.
+    #[test]
+    fn import_still_accepts_a_branch_of_the_same_business() {
+        let a = seeded_as("dev-A", &["a1"]);
+        let b = branch_of(&a, "dev-B", &["b1"]);
+        let archive = export_string(&b);
+
+        let mut target = a;
+        let summary = import_jsonl(&mut target, archive.as_bytes())
+            .expect("a shared-genesis branch must merge");
+        assert_eq!(summary.inserted, 1, "only dev-B's new item is new");
     }
 
     fn export_string(conn: &Connection) -> String {
