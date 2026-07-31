@@ -27,7 +27,7 @@ pub const RESCUE_PREFIX: &str = "pre-restore-";
 /// taken before — each is a genuinely different ledger, and keeping three means
 /// three undo steps. Three is still the chosen depth; it just isn't free here,
 /// which is why the rescue copies are pruned only after their consumer has
-/// finished reading (see `restore_database` and `import_event_log`).
+/// finished reading (see `perform_restore` and `import_event_log`).
 pub const KEEP_AUTO: usize = 3;
 
 /// Format a Unix-ms timestamp as `YYYYMMDD-HHMMSS` (UTC).
@@ -240,6 +240,76 @@ pub fn ensure_rescue_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// Perform a restore against the filesystem: rescue copy, swap, prune, re-mint.
+///
+/// Split out of the `restore_database` command so the ordering can be tested.
+/// Three separate data-loss bugs came from this sequence being wrong — pruning
+/// before the swap deleted the candidate, restoring the live file onto itself
+/// truncated it, and adopting the snapshot's `device_id` made two installs
+/// author under one identity. A Tauri command cannot be called from a test, so
+/// while the ordering lived inline none of that was reachable.
+///
+/// Takes the live connection as `&mut Option<Connection>` — the shape the app
+/// state actually holds — because *when* it becomes `None` is part of what has to
+/// be right. The rescue copy needs it open; the swap needs it closed, since
+/// dropping a connection whose `-wal` has just been deleted lets SQLite write to
+/// the file that was only just restored. Every rejection happens while it is
+/// still `Some`, so a refused restore leaves the session usable.
+///
+/// Returns where the rescue copy was written.
+pub fn perform_restore(
+    live_conn: &mut Option<Connection>,
+    candidate: &Path,
+    live: &Path,
+    data_dir: &Path,
+    device_id: &str,
+    now: i64,
+) -> Result<PathBuf, String> {
+    validate_candidate(candidate).map_err(|e| e.to_string())?;
+
+    // Rejections belong before the connection is dropped: past that point the
+    // app is unusable until a restart, so failing there would brick the session
+    // over a recoverable mistake.
+    if is_same_file(candidate, live) {
+        return Err("this backup is the database you are using right now; \
+                    choose a backup file instead"
+            .into());
+    }
+
+    // Safety copy first: a restore must always be undoable.
+    let rescue = ensure_rescue_dir(data_dir).map_err(|e| e.to_string())?;
+    let rescue_path = rescue.join(snapshot_name(RESCUE_PREFIX, now));
+    {
+        let conn = live_conn.as_ref().ok_or("the ledger is already closed; restart the app")?;
+        snapshot_to(conn, &rescue_path).map_err(|e| e.to_string())?;
+    }
+
+    // Close the live connection before touching the file it points at.
+    *live_conn = None;
+    swap_in_place(candidate, live).map_err(|e| e.to_string())?;
+
+    // Prune AFTER the swap, never before. The file dialog can offer the rescue
+    // copies as a restore source, so `candidate` may be the oldest
+    // `pre-restore-*.db` in this very directory — pruning first would delete it
+    // out from under the swap about to read it.
+    let _ = prune(&rescue, RESCUE_PREFIX, KEEP_AUTO);
+
+    // A snapshot copies the whole file, `app_settings` included, so a backup made
+    // by another install carries that install's `device_id`. Adopting it would
+    // make two installs mint byte-identical event ids for different events.
+    use rusqlite::OptionalExtension;
+    let reopened = Connection::open(live).map_err(|e| e.to_string())?;
+    let restored_id: Option<String> = reopened
+        .query_row("SELECT value FROM app_settings WHERE key = 'device_id'", [], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if restored_id.as_deref() != Some(device_id) {
+        accounting_core::remint_device_id(&reopened).map_err(|e| e.to_string())?;
+    }
+
+    Ok(rescue_path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -438,6 +508,143 @@ mod tests {
         let restored = Connection::open(&live).unwrap();
         let n: i64 = restored.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 2, "the live file must now be the candidate");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- End-to-end restore tests ----
+    //
+    // These drive the whole sequence, which is where the three data-loss bugs
+    // lived. Each one fails if a step moves.
+
+    /// A live ledger with `n` events and a known `device_id`, left closed.
+    fn live_ledger(path: &Path, device_id: &str, n: usize) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        apply_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('device_id', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [device_id],
+        )
+        .unwrap();
+        let mut hlc = Hlc::new(device_id);
+        for i in 0..n {
+            append_event(&conn, &mut hlc, 1000 + i as u64, device_id, "u", "ItemDefined",
+                &serde_json::json!({"itemId": format!("i{i}")})).unwrap();
+        }
+        conn
+    }
+
+    fn count_events(path: &Path) -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn device_id_of(path: &Path) -> String {
+        Connection::open(path)
+            .unwrap()
+            .query_row("SELECT value FROM app_settings WHERE key = 'device_id'", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// The happy path: the ledger becomes the backup, the old one is rescued, and
+    /// the connection is closed so the app asks for a restart.
+    #[test]
+    fn restore_replaces_the_ledger_and_leaves_an_undo_copy() {
+        let dir = temp_dir("restore-happy");
+        let live = dir.join("ledger.db");
+        let conn = live_ledger(&live, "install-A", 2);
+
+        // A backup of the same install, with more history.
+        let backup = dir.join("backup.db");
+        let older = live_ledger(&dir.join("other.db"), "install-A", 5);
+        snapshot_to(&older, &backup).unwrap();
+        drop(older);
+
+        let mut held = Some(conn);
+        let rescue_path =
+            perform_restore(&mut held, &backup, &live, &dir, "install-A", 1_700_000_000_000)
+                .expect("a valid backup of this install must restore");
+
+        assert!(held.is_none(), "the ledger must be closed so the app asks for a restart");
+        assert_eq!(count_events(&live), 5, "the live ledger must now be the backup");
+        assert_eq!(count_events(&rescue_path), 2, "the rescue copy must hold the pre-restore log");
+        assert_eq!(
+            device_id_of(&live), "install-A",
+            "restoring this install's own backup must keep its identity"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Finding: picking the live database in the file dialog truncated it to zero
+    /// bytes, because `fs::copy(p, p)` returns `Ok(0)` after emptying `p`.
+    #[test]
+    fn restore_refuses_the_live_ledger_and_keeps_the_session_alive() {
+        let dir = temp_dir("restore-self");
+        let live = dir.join("ledger.db");
+        let conn = live_ledger(&live, "install-A", 3);
+
+        let mut held = Some(conn);
+        let err = perform_restore(&mut held, &live, &live, &dir, "install-A", 1_700_000_000_000)
+            .expect_err("restoring the live ledger onto itself must be refused");
+
+        assert!(err.contains("using right now"), "the message must explain why: {err}");
+        assert!(held.is_some(), "a refused restore must not cost the user their session");
+        assert_eq!(count_events(&live), 3, "the ledger must be intact, not truncated");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Finding: the rescue directory was pruned before the swap, so restoring the
+    /// oldest `pre-restore-*.db` deleted the candidate out from under the copy.
+    #[test]
+    fn restore_from_the_oldest_rescue_copy_still_finds_its_source() {
+        let dir = temp_dir("restore-prunes-source");
+        let live = dir.join("ledger.db");
+        let conn = live_ledger(&live, "install-A", 1);
+
+        // Fill the rescue directory past KEEP_AUTO, oldest first, so the file the
+        // user picks is the one a prune would remove.
+        let rescue = ensure_rescue_dir(&dir).unwrap();
+        let source = live_ledger(&dir.join("src.db"), "install-A", 7);
+        let oldest = rescue.join(snapshot_name(RESCUE_PREFIX, 1_600_000_000_000));
+        snapshot_to(&source, &oldest).unwrap();
+        drop(source);
+        for stamp in [1_600_000_001_000, 1_600_000_002_000, 1_600_000_003_000] {
+            fs::copy(&oldest, rescue.join(snapshot_name(RESCUE_PREFIX, stamp))).unwrap();
+        }
+
+        let mut held = Some(conn);
+        perform_restore(&mut held, &oldest, &live, &dir, "install-A", 1_700_000_000_000)
+            .expect("the oldest rescue copy must be usable as a restore source");
+
+        assert_eq!(count_events(&live), 7, "the picked backup must have reached the live ledger");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Finding: a snapshot copies `app_settings` too, so restoring another
+    /// install's backup cloned its `device_id` — two installs then mint
+    /// byte-identical event ids for different events, which cannot be merged.
+    #[test]
+    fn restore_of_another_installs_backup_remints_the_device_id() {
+        let dir = temp_dir("restore-foreign-id");
+        let live = dir.join("ledger.db");
+        let conn = live_ledger(&live, "install-B", 2);
+
+        let foreign = live_ledger(&dir.join("foreign.db"), "install-A", 4);
+        let backup = dir.join("from-A.db");
+        snapshot_to(&foreign, &backup).unwrap();
+        drop(foreign);
+
+        let mut held = Some(conn);
+        perform_restore(&mut held, &backup, &live, &dir, "install-B", 1_700_000_000_000)
+            .expect("another install's backup is a legitimate restore source");
+
+        assert_eq!(count_events(&live), 4, "the restore itself must have happened");
+        let adopted = device_id_of(&live);
+        assert_ne!(adopted, "install-A", "the making install's identity must not be adopted");
+        assert_ne!(adopted, "install-B", "a fresh id is minted; the old one is not resurrected");
+        assert!(!adopted.is_empty(), "a replacement identity must exist");
         let _ = fs::remove_dir_all(&dir);
     }
 

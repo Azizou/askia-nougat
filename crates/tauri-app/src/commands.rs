@@ -416,9 +416,6 @@ pub fn restore_database(
     use tauri::Manager;
 
     let candidate = std::path::PathBuf::from(&src_path);
-    crate::backup::validate_candidate(&candidate)
-        .map_err(|e| AppError { message: e.to_string() })?;
-
     let data_dir = app
         .path()
         .app_local_data_dir()
@@ -426,59 +423,24 @@ pub fn restore_database(
         .join("accounting");
     let live = data_dir.join("ledger.db");
 
-    // Everything that can reject must reject before `db.conn` is dropped below:
-    // past that point the app is unusable until a restart, so failing there would
-    // brick the session over a recoverable mistake. `swap_in_place` re-checks
-    // this as a last line of defence, but the user-facing rejection belongs here.
-    if crate::backup::is_same_file(&candidate, &live) {
-        return Err(AppError {
-            message: "this backup is the database you are using right now; \
-                      choose a backup file instead"
-                .into(),
-        });
-    }
-
     let mut db = state.db.lock().unwrap();
     let now = now_ms() as i64;
 
-    // Safety copy first: a restore must always be undoable.
-    let rescue = crate::backup::ensure_rescue_dir(&data_dir)?;
-    let rescue_path = rescue.join(crate::backup::snapshot_name(crate::backup::RESCUE_PREFIX, now));
-    {
-        let conn = db.conn()?;
-        crate::backup::snapshot_to(conn, &rescue_path)?;
-    }
-
-    // Close the live connection before overwriting the file it points at.
-    db.conn = None;
-    crate::backup::swap_in_place(&candidate, &live)?;
-
-    // Prune AFTER the swap, never before. The file dialog can offer the rescue
-    // copies themselves as a restore source, so `candidate` may be the oldest
-    // `pre-restore-*.db` in this very directory — and pruning first would delete
-    // it out from under the swap that is about to read it. Once the swap has
-    // copied its bytes into `live`, removing the rescue copy is harmless.
-    let _ = crate::backup::prune(&rescue, crate::backup::RESCUE_PREFIX, crate::backup::KEEP_AUTO);
-
-    // A snapshot is a copy of the whole file, `app_settings` included, so a backup
-    // made by another install carries that install's `device_id`. Adopting it would
-    // make two installs author under one identity — byte-identical event ids for
-    // different events, colliding `(device_id, seq)` — which is precisely the
-    // unmergeable state per-install identity exists to prevent. So re-mint when the
-    // restored id is not the one this session has been running under.
-    //
-    // Restoring this install's own backup keeps its id: `device_id` is write-once,
-    // so any snapshot of this install necessarily carries this install's id, and
-    // that continuity is worth preserving. Events already in the restored log keep
-    // whatever id authored them; only future events need an unshared identity.
-    use rusqlite::OptionalExtension;
-    let reopened = rusqlite::Connection::open(&live)?;
-    let restored_id: Option<String> = reopened
-        .query_row("SELECT value FROM app_settings WHERE key = 'device_id'", [], |r| r.get(0))
-        .optional()?;
-    if restored_id.as_deref() != Some(state.device_id.as_str()) {
-        accounting_core::remint_device_id(&reopened)?;
-    }
+    // The whole sequence lives in `backup::perform_restore` so that its ordering
+    // can be tested; this command only supplies the paths. It is handed `db.conn`
+    // itself, not a borrow of the connection, because closing the ledger at the
+    // right moment — after the rescue copy, before the swap — is part of the
+    // sequence being tested. It clears `db.conn` on success and leaves it open on
+    // every rejection, so a refused restore does not cost the user their session.
+    let rescue_path = crate::backup::perform_restore(
+        &mut db.conn,
+        &candidate,
+        &live,
+        &data_dir,
+        &state.device_id,
+        now,
+    )
+    .map_err(|message| AppError { message })?;
 
     Ok(RestoreResult { rescue_path: rescue_path.to_string_lossy().into_owned() })
 }
