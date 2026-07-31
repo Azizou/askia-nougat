@@ -310,4 +310,38 @@ reviewer notices.
 plan's `swap_in_place` is exactly what shipped up to `1457b8f`. Shipping known
 silent total data loss to satisfy plan fidelity is not a trade worth making.
 
+## D14. Restore pruned its own source before the swap (fixed, `17ae47b` + test `27fb02d`)
+
+Found by me during Task 13's close-out, again not in the plan and not by any
+reviewer. Second data-loss defect on the restore path, on the *undo* mechanism the
+safety copy exists to provide.
+
+**The bug.** `restore_database` ran, in order: snapshot the live ledger into
+`rescue/pre-restore-<now>.db`, **prune** the rescue directory to `KEEP_AUTO=3`, drop
+the connection, then `swap_in_place(candidate, live)`. The restore file dialog can
+offer the rescue copies themselves as a source — that is the whole point of keeping
+them — so `candidate` may be the oldest `pre-restore-*.db` in that directory. Prune
+(keep=3) deletes the oldest matching `.db`, which is exactly that candidate, and the
+swap then `fs::copy`s from a path that no longer exists. Reproduced by simulation:
+four `pre-restore-*.db`, prune-first leaves the chosen oldest one gone; `fs::copy`
+from a missing source errors, so restoring to the oldest undo point fails outright.
+
+**The fix.** Move the prune to *after* the swap. Once `swap_in_place` has copied the
+candidate's bytes into `live`, deleting its rescue copy is harmless. `import_event_log`
+is unaffected: it reads `.jsonl`, and `prune` matches only `.db`.
+
+**Test.** Pinned at the `backup.rs` primitive level (no Tauri harness, per the plan's
+closing note): three rescue copies with markers, restore from the oldest, write the
+fourth pre-restore copy, then swap-then-prune, and assert `live` carries the oldest
+copy's marker. `tauri-app` 16 → 17.
+
+**Pattern worth naming.** Both restore defects (D13, D14) share a root: **the restore
+source and the files restore manages can be the same file.** D13 was source == live;
+D14 was source == a rescue copy in the directory being pruned. Any operation that
+both consumes a user-chosen path and mutates the filesystem around it must ask "what
+if the path *is* one of the things I'm about to touch?" That question, asked once for
+the whole restore path, would have caught both. Grepping for asserted-but-unenforced
+invariants (D7/D9/D13) is one habit; this is its sibling — check aliasing between
+inputs and side-effect targets.
+
 <!-- Entries appended below as decisions are made. -->
