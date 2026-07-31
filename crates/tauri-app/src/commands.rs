@@ -448,11 +448,17 @@ pub fn restore_database(
         let conn = db.conn()?;
         crate::backup::snapshot_to(conn, &rescue_path)?;
     }
-    let _ = crate::backup::prune(&rescue, crate::backup::RESCUE_PREFIX, crate::backup::KEEP_AUTO);
 
     // Close the live connection before overwriting the file it points at.
     db.conn = None;
     crate::backup::swap_in_place(&candidate, &live)?;
+
+    // Prune AFTER the swap, never before. The file dialog can offer the rescue
+    // copies themselves as a restore source, so `candidate` may be the oldest
+    // `pre-restore-*.db` in this very directory — and pruning first would delete
+    // it out from under the swap that is about to read it. Once the swap has
+    // copied its bytes into `live`, removing the rescue copy is harmless.
+    let _ = crate::backup::prune(&rescue, crate::backup::RESCUE_PREFIX, crate::backup::KEEP_AUTO);
 
     Ok(RestoreResult { rescue_path: rescue_path.to_string_lossy().into_owned() })
 }
