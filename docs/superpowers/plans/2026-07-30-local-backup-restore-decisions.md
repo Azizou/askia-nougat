@@ -344,4 +344,101 @@ the whole restore path, would have caught both. Grepping for asserted-but-unenfo
 invariants (D7/D9/D13) is one habit; this is its sibling — check aliasing between
 inputs and side-effect targets.
 
+## D15. Whole-branch review: two more Criticals, and a process failure of mine
+
+A whole-branch reviewer returned seven findings. I verified each with my own
+executable probe before acting — worth doing, because the probes corrected the
+report's details more than once (the foreign-ledger import trips on `users.id`,
+not `accounts.system_role` as reported).
+
+**Critical 1 — importing another business's log bricked the app permanently
+(fixed, `7a70780`).** `import_jsonl` committed the merged events and only then ran
+reconciliation. A log from an independently founded ledger has its own
+`UserRegistered` genesis, so the merged log opens two of every system account and
+cannot be replayed at all. Probe: `events before=15 after=30`, then
+`rebuild err: UNIQUE constraint failed: users.id`. Because `init_state` calls
+`rebuild(...).expect(...)`, every subsequent launch would panic — the user's app
+would simply never open again, with no in-app way back. Fixed with a
+`ForeignLedger` guard *before* the transaction: compare the archive's genesis
+event id against the local log's earliest `UserRegistered`. Refusing pre-commit is
+the whole point; a post-commit rejection cannot undo an unreplayable log. Verified
+the guard both catches the bug (temporarily neutered it to `if false && …`,
+confirmed the test FAILED, restored it) and does not over-reject: an empty local
+log still imports, and same-genesis branches still merge.
+
+**Critical 2 — restore cloned the making install's identity (fixed, `76f6d48`).**
+`VACUUM INTO` copies the whole file, `app_settings` included, and `app_settings` is
+deliberately outside `PROJECTION_TABLES` so it survives `rebuild`. Restoring
+install A's backup onto install B therefore made B author as A. Probe:
+`AAAA-install-A` → `BBBB-install-B`. Two installs sharing a `device_id` mint
+byte-identical event ids for *different* events and collide on `(device_id, seq)`
+— precisely the unmergeable state per-install identity exists to prevent, so this
+silently destroyed the merge capability the user asked to keep in scope. Fixed
+with `remint_device_id`, called when the restored id differs from the running one.
+Kept as a separate function rather than a `SETTING_KEYS` entry so the write-once
+IPC hardening from D7 survives; a test pins that `set_setting(conn, "device_id",
+…)` still errors.
+
+**Important — `import_event_log` had the D14 defect too (fixed, `cda0764`).** The
+same prune-before-read ordering, at the mirror call site. I have "when you fix an
+ordering bug, check the mirror call site" in memory as a habit and still missed it;
+the reviewer caught it. Reading D14's own closing paragraph would have found it.
+
+**Fixed without dispute:** close-time backup moved from `WindowEvent::Destroyed`
+to `CloseRequested` (`8b87a08`) — `Destroyed` fires during teardown, so a
+`VACUUM INTO` of a large ledger could be cut short by process exit. Export header
+no longer carries `backup_folder` (`cb02277`) — an export is the file a user emails
+to whoever is helping them, and the header disclosed their home directory layout
+for no archival benefit, since import never applies the header's settings.
+`KEEP_AUTO`'s doc rationale corrected (`876f6d9`) — "each snapshot is a strict
+superset of the previous one" is true for auto-backups and false for the
+`pre-restore-*` copies sharing the constant, since a restore replaces history
+rather than appending to it.
+
+**Finding 7 accepted — the swap is now atomic (`cce15d0`).** The reviewer noted
+`swap_in_place` used `fs::copy` onto the live path and judged it minor because the
+rescue copy makes it recoverable. Fixed anyway: a copy interrupted partway leaves
+the ledger a hybrid of two databases, and startup's `rebuild(...).expect(...)`
+turns a corrupt ledger into an app that will not open — the same unlaunchable
+outcome as Critical 1, reached by a different route, and "recoverable" there means
+the user finding a rescue file with the app dead. Now stages beside the live file
+and `fs::rename`s over it. Sidecar deletion moved *before* the rename: between
+renaming in a new database and deleting the old `-wal`, a crash would leave SQLite
+ready to replay the old write-ahead log onto the new file.
+
+**Coverage gap closed — the reviewer's sharpest point (`f598ffe`).** "No test
+drives `import_event_log`/`restore_database` end to end, which is where findings
+1-3 live." Exactly right, and it explains the *shape* of this branch's bug list:
+three data-loss defects all lived in one unreachable sequence, because a
+`#[tauri::command]` cannot be called from a test. Extracted the sequence into
+`backup::perform_restore` and rewired the command to call it, so the tests cover
+the real path rather than a parallel copy. It takes `&mut Option<Connection>`
+rather than `&Connection` because *when* the ledger closes is part of what must be
+right: the rescue copy needs it open, the swap needs it closed, and every
+rejection must happen while it is still open. Each of the three new end-to-end
+tests was confirmed to fail with its defect reintroduced.
+
+**Finding 5 accepted, no code change.** `last_backup_at` lags one session, because
+the close-time write lands after the UI is gone. The reviewer itself called this
+acceptable; the comment at the call site says so.
+
+**My process failure, recorded because it is the most transferable item here.** I
+declared the reviewer hung after ~35 minutes and stopped it. It had in fact
+completed and returned all seven findings. Two Criticals — either of which ends
+with the user's app refusing to launch — were in that report I nearly discarded.
+The judgment error was treating "longer than I expected" as evidence of failure
+when I had no signal either way, on a task whose whole value was catching what I
+had missed. A review of a large branch legitimately takes a long time. Absent an
+actual error, wait.
+
+**What the seven findings have in common.** Six of the seven are one question asked
+at six places: *what is the state of the ledger if this stops in the middle, or if
+the file I am reading is the file I am writing?* D14 named the aliasing half of
+that. This adds the interruption half — and the reason both matter more here than
+in most code is that the failure mode is not a bad result but an app that will not
+start, on a single-install local-first ledger with no server-side copy. Where an
+invariant's violation is unrecoverable by the user, the guard belongs before the
+commit, not after.
+
 <!-- Entries appended below as decisions are made. -->
+
