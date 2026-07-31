@@ -16,9 +16,18 @@ pub const AUTO_PREFIX: &str = "ledger-auto-";
 pub const RESCUE_PREFIX: &str = "pre-restore-";
 /// How many automatic backups and rescue copies to keep.
 ///
-/// Three, not ten: the event log is append-only, so each snapshot is a strict
-/// superset of the previous one. Extra copies are nested prefixes of one
-/// history, not independent versions, so they buy very little.
+/// Three, not ten, for the automatic backups: the event log is append-only, so
+/// each successive snapshot is a strict superset of the previous one. Extra
+/// copies are nested prefixes of one history, not independent versions, so they
+/// buy very little.
+///
+/// That reasoning does NOT hold for `RESCUE_PREFIX` copies, which share this
+/// constant. A restore or merge-import replaces or diverges history rather than
+/// appending to it, so a rescue copy taken after one is not a superset of the one
+/// taken before — each is a genuinely different ledger, and keeping three means
+/// three undo steps. Three is still the chosen depth; it just isn't free here,
+/// which is why the rescue copies are pruned only after their consumer has
+/// finished reading (see `restore_database` and `import_event_log`).
 pub const KEEP_AUTO: usize = 3;
 
 /// Format a Unix-ms timestamp as `YYYYMMDD-HHMMSS` (UTC).
