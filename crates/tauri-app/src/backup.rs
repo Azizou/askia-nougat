@@ -176,14 +176,30 @@ pub fn swap_in_place(candidate: &Path, live: &Path) -> std::io::Result<()> {
              choose a backup file instead",
         ));
     }
-    fs::copy(candidate, live)?;
+    // Copy beside the target, then rename over it, rather than copying straight
+    // onto it. A `fs::copy` interrupted halfway — disk full, power loss — would
+    // leave the live ledger a hybrid of two databases, and startup calls
+    // `rebuild(...).expect(...)`, so a corrupt file makes the app unlaunchable.
+    // `fs::rename` within one directory is atomic, so the live path only ever
+    // names the whole old file or the whole new one.
+    let staged = PathBuf::from(format!("{}.incoming", live.to_string_lossy()));
+    if let Err(e) = fs::copy(candidate, &staged) {
+        let _ = fs::remove_file(&staged);
+        return Err(e);
+    }
+
+    // Sidecars go before the rename, not after: between renaming in a new
+    // database and deleting the old `-wal`, a crash would leave SQLite ready to
+    // replay the OLD write-ahead log onto the NEW file. Discarding the old
+    // sidecars early risks nothing — they belong to the database being replaced,
+    // and the caller's rescue snapshot already captured it complete.
     for suffix in ["-wal", "-shm"] {
         let sidecar = PathBuf::from(format!("{}{suffix}", live.to_string_lossy()));
         if sidecar.exists() {
             fs::remove_file(&sidecar)?;
         }
     }
-    Ok(())
+    fs::rename(&staged, live)
 }
 
 /// Whether two paths name the same file on disk.
@@ -422,6 +438,59 @@ mod tests {
         let restored = Connection::open(&live).unwrap();
         let n: i64 = restored.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 2, "the live file must now be the candidate");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The swap stages a copy beside the live file, so a failure must leave both
+    /// the ledger and the directory as they were — no half-written ledger, and no
+    /// `.incoming` litter that a later swap would have to reason about.
+    #[test]
+    fn a_failed_swap_leaves_the_live_ledger_untouched() {
+        let dir = temp_dir("swap-fails");
+        let live = dir.join("ledger.db");
+        let conn = Connection::open(&live).unwrap();
+        apply_schema(&conn).unwrap();
+        let mut hlc = Hlc::new("devA");
+        append_event(&conn, &mut hlc, 1000, "devA", "u", "ItemDefined",
+            &serde_json::json!({"itemId": "i1"})).unwrap();
+        drop(conn);
+        let before = fs::read(&live).unwrap();
+
+        let missing = dir.join("not-a-backup.db");
+        assert!(swap_in_place(&missing, &live).is_err(), "a missing candidate must fail the swap");
+
+        assert_eq!(fs::read(&live).unwrap(), before, "the live ledger must be byte-identical");
+        assert!(!dir.join("ledger.db.incoming").exists(), "the staging file must be cleaned up");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The swap must replace the directory entry, not rewrite the live file's
+    /// bytes in place. A reader that already opened the old ledger keeps reading
+    /// the whole old database rather than watching it mutate underneath it — the
+    /// observable difference between `rename` and copying onto the live path, and
+    /// the reason a half-finished swap cannot corrupt the ledger.
+    #[cfg(unix)]
+    #[test]
+    fn swap_replaces_the_directory_entry_rather_than_the_bytes() {
+        use std::io::Read;
+
+        let dir = temp_dir("swap-atomic");
+        let live = dir.join("ledger.db");
+        fs::write(&live, b"old-ledger-contents").unwrap();
+        let candidate = dir.join("snap.db");
+        fs::write(&candidate, b"new").unwrap();
+
+        // Hold the old file open across the swap.
+        let mut held = fs::File::open(&live).unwrap();
+        swap_in_place(&candidate, &live).unwrap();
+
+        let mut through_old_fd = String::new();
+        held.read_to_string(&mut through_old_fd).unwrap();
+        assert_eq!(
+            through_old_fd, "old-ledger-contents",
+            "an already-open reader must still see the complete old file"
+        );
+        assert_eq!(fs::read(&live).unwrap(), b"new", "the path must now name the new file");
         let _ = fs::remove_dir_all(&dir);
     }
 
