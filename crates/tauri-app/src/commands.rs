@@ -360,3 +360,172 @@ pub fn list_payments(state: State<AppState>) -> Result<Vec<PaymentRow>, AppError
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
+
+// ---- Backup / restore commands ----
+
+#[derive(Serialize)]
+pub struct BackupResult {
+    pub path: String,
+    pub bytes: u64,
+    /// When this backup was written, Unix ms. Returned so the frontend can
+    /// refresh its cached `last_backup_at` — the React settings context only
+    /// learns about a setting the UI itself wrote, and this one is written here
+    /// in Rust.
+    pub at: i64,
+}
+
+/// Write a manual snapshot into `dest_dir`, remember the folder for automatic
+/// backups, and record the time.
+#[tauri::command]
+pub fn backup_database(
+    state: State<AppState>,
+    dest_dir: String,
+) -> Result<BackupResult, AppError> {
+    let db = state.db.lock().unwrap();
+    let conn = db.conn()?;
+    let now = now_ms() as i64;
+
+    let dir = std::path::PathBuf::from(&dest_dir);
+    let dest = dir.join(crate::backup::snapshot_name(crate::backup::MANUAL_PREFIX, now));
+    let bytes = crate::backup::snapshot_to(conn, &dest)?;
+
+    // Remember where the user keeps backups so auto-backup-on-close can use it.
+    accounting_core::set_setting(conn, "backup_folder", &dest_dir)?;
+    accounting_core::set_setting(conn, "last_backup_at", &now.to_string())?;
+
+    Ok(BackupResult { path: dest.to_string_lossy().into_owned(), bytes, at: now })
+}
+
+#[derive(Serialize)]
+pub struct RestoreResult {
+    /// Where the pre-restore safety copy was written.
+    pub rescue_path: String,
+}
+
+/// Replace the live ledger with `src_path`.
+///
+/// Order matters: validate the candidate, safety-copy the current ledger, drop
+/// the live connection, then swap. The app must be restarted afterwards —
+/// startup rebuilds every projection from the restored log.
+#[tauri::command]
+pub fn restore_database(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    src_path: String,
+) -> Result<RestoreResult, AppError> {
+    use tauri::Manager;
+
+    let candidate = std::path::PathBuf::from(&src_path);
+    crate::backup::validate_candidate(&candidate)
+        .map_err(|e| AppError { message: e.to_string() })?;
+
+    let data_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| AppError { message: format!("cannot locate the data folder: {e}") })?
+        .join("accounting");
+    let live = data_dir.join("ledger.db");
+
+    let mut db = state.db.lock().unwrap();
+    let now = now_ms() as i64;
+
+    // Safety copy first: a restore must always be undoable.
+    let rescue = crate::backup::ensure_rescue_dir(&data_dir)?;
+    let rescue_path = rescue.join(crate::backup::snapshot_name(crate::backup::RESCUE_PREFIX, now));
+    {
+        let conn = db.conn()?;
+        crate::backup::snapshot_to(conn, &rescue_path)?;
+    }
+    let _ = crate::backup::prune(&rescue, crate::backup::RESCUE_PREFIX, crate::backup::KEEP_AUTO);
+
+    // Close the live connection before overwriting the file it points at.
+    db.conn = None;
+    crate::backup::swap_in_place(&candidate, &live)?;
+
+    Ok(RestoreResult { rescue_path: rescue_path.to_string_lossy().into_owned() })
+}
+
+#[derive(Serialize)]
+pub struct ExportResult {
+    pub path: String,
+    pub events: usize,
+}
+
+/// Write the whole event log as JSONL into `dest_dir`.
+#[tauri::command]
+pub fn export_event_log(
+    state: State<AppState>,
+    dest_dir: String,
+) -> Result<ExportResult, AppError> {
+    let db = state.db.lock().unwrap();
+    let conn = db.conn()?;
+    let now = now_ms() as i64;
+
+    let name = format!("ledger-{}.jsonl", crate::backup::timestamp_utc(now));
+    let dest = std::path::PathBuf::from(&dest_dir).join(name);
+    let file = std::fs::File::create(&dest)?;
+    let mut writer = std::io::BufWriter::new(file);
+
+    let events = accounting_core::export_jsonl(conn, &mut writer, now, env!("CARGO_PKG_VERSION"))?;
+
+    Ok(ExportResult { path: dest.to_string_lossy().into_owned(), events })
+}
+
+#[derive(Serialize)]
+pub struct ImportResult {
+    pub inserted: usize,
+    pub skipped_duplicates: usize,
+    pub total_events: usize,
+    pub rescue_path: String,
+}
+
+/// Merge a JSONL archive into the live ledger.
+///
+/// Takes the same safety copy as restore, because the merge ends with a
+/// reconciliation check that can reject a ledger which was healthy before.
+#[tauri::command]
+pub fn import_event_log(
+    app: tauri::AppHandle,
+    state: State<AppState>,
+    src_path: String,
+) -> Result<ImportResult, AppError> {
+    use tauri::Manager;
+
+    let data_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| AppError { message: format!("cannot locate the data folder: {e}") })?
+        .join("accounting");
+
+    let mut db = state.db.lock().unwrap();
+    let now = now_ms() as i64;
+
+    let rescue = crate::backup::ensure_rescue_dir(&data_dir)?;
+    let rescue_path = rescue.join(crate::backup::snapshot_name(crate::backup::RESCUE_PREFIX, now));
+    {
+        let conn = db.conn()?;
+        crate::backup::snapshot_to(conn, &rescue_path)?;
+    }
+    let _ = crate::backup::prune(&rescue, crate::backup::RESCUE_PREFIX, crate::backup::KEEP_AUTO);
+
+    let file = std::fs::File::open(&src_path)?;
+    let reader = std::io::BufReader::new(file);
+
+    let crate::state::Db { ref mut conn, ref mut hlc } = *db;
+    let conn = conn.as_mut().ok_or_else(|| AppError {
+        message: "Restore finished. Please close and reopen the app.".into(),
+    })?;
+    let summary = accounting_core::import_jsonl(conn, reader)?;
+
+    // Advance the clock past everything merged in, so events this install
+    // appends next sort after the imported ones. rehydrate_from_log reads
+    // MAX(hlc) and calls Hlc::observe — exactly what is needed here.
+    accounting_core::rehydrate_from_log(conn, hlc, now_ms())?;
+
+    Ok(ImportResult {
+        inserted: summary.inserted,
+        skipped_duplicates: summary.skipped_duplicates,
+        total_events: summary.total_events,
+        rescue_path: rescue_path.to_string_lossy().into_owned(),
+    })
+}

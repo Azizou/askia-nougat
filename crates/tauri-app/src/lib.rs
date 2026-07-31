@@ -52,6 +52,7 @@ fn init_state(app_data_dir: PathBuf) -> AppState {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_local_data_dir()
                 .expect("failed to resolve app data dir");
@@ -77,6 +78,10 @@ pub fn run() {
             commands::record_payment_made,
             commands::reverse_transaction,
             commands::list_payments,
+            commands::backup_database,
+            commands::restore_database,
+            commands::export_event_log,
+            commands::import_event_log,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
