@@ -216,4 +216,46 @@ The D7 `device_id` fix was deliberately applied *before* dispatching the backup
 implementer rather than concurrently — `settings.rs` is core, and two writers in one
 tree is how you get lost work.
 
+## D11. `main` moved under the branch; the user's WIP is theirs, not mine to restore
+
+At the start of this run `git status` showed 7 files modified by the user plus an
+untracked `feeback-v2.md`. Partway through they were all gone from the working tree,
+which looks exactly like lost work. Checked before touching anything further:
+
+- `main` advanced from `0aa52e5` to `49f77fd` (3 new commits), and those commits
+  contain precisely the 7 files that had been dirty (`ui/src/i18n/{en,fr}.ts`,
+  `ui/src/lib.ts`, `ui/src/pages/{Parties,Payments,Sales}.tsx`, `ui/vite.config.ts`,
+  `crates/tauri-app/tauri.conf.json`).
+- `git merge-base --is-ancestor main HEAD` → true: this branch is rebased onto the
+  new tip, so nothing was dropped.
+- `feeback-v2.md` survives in `stash@{0}`'s untracked parent (`stash@{0}^3`), 111 lines.
+
+**Decision:** leave all of it alone. The user committed their own work to `main` and
+rebased my branch; that is their call, not a problem to fix. `feeback-v2.md` stays
+stashed and uncommitted per D0 — I do not restore it to the working tree, because
+popping a stash would also be a change to their tree that they did not ask for.
+
+**Verified the rebase did not break anything** before continuing: 163 `accounting-core`
++ 14 `tauri-app` tests still pass. This mattered because the new `main` commits touch
+`tauri.conf.json` and both `Cargo.toml` version fields.
+
+**Re-verified Task 12's anchors against the moved files** rather than trusting the plan:
+`errorMessage` is still exported at `ui/src/lib.ts:40`, `formatMoney` gained a `locale`
+parameter but keeps its first two arguments, and every line number Task 12 cites in
+`Preferences.tsx` and the two i18n `preferences` blocks is still accurate. A plan written
+against a pre-rebase tree is exactly where stale line references bite.
+
+## D12. Pre-existing `postcss` advisory not fixed on this branch
+
+`npm audit` reports 1 high-severity advisory: `postcss <= 8.5.17`, GHSA-r28c-9q8g-f849
+(path traversal via source-map auto-loading, arbitrary `.map` disclosure). Traced it:
+`postcss@8.5.16` arrives only through `vite@6.4.3`. It is not something
+`@tauri-apps/plugin-dialog` introduced — that install added 2 packages — so it predates
+this work.
+
+**Decision:** report it, do not fix it here. `npm audit fix` would bump vite/postcss,
+which is a build-toolchain change outside the scope the user approved for this feature.
+It is also a dev-dependency-only exposure for a desktop app that serves no untrusted
+source maps. Raised to the user as a finding instead.
+
 <!-- Entries appended below as decisions are made. -->
