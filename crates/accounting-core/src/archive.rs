@@ -28,7 +28,12 @@ pub enum ArchiveError {
     /// An incoming event's `(device_id, seq)` is taken locally by a different
     /// event id. Unmergeable — both logs authored under the same identity.
     Collision { device_id: String, seq: i64 },
-    /// The merged ledger failed reconciliation; the import was rolled back.
+    /// The merged ledger failed reconciliation.
+    ///
+    /// The events are **still committed** — the check necessarily runs after the
+    /// commit, because `rebuild` and `run_all_checks` can only see the merged log
+    /// once it is in the table. Recovery is the caller's safety copy, not a
+    /// rollback; the caller must say so when it reports this.
     Reconciliation(String),
     Db(rusqlite::Error),
     Io(String),
@@ -48,7 +53,11 @@ impl std::fmt::Display for ArchiveError {
                  database backup instead."
             ),
             ArchiveError::Reconciliation(m) => {
-                write!(f, "import was cancelled because the combined ledger did not balance: {m}")
+                write!(
+                    f,
+                    "the combined ledger did not balance after the merge ({m}). The imported \
+                     entries were kept, so restore the safety copy made before the import."
+                )
             }
             ArchiveError::Db(e) => write!(f, "database error: {e}"),
             ArchiveError::Io(m) => write!(f, "could not read or write the file: {m}"),
@@ -291,7 +300,11 @@ pub fn import_jsonl(
     // Projections are derived state: replay the merged log in HLC order.
     crate::projectors::rebuild(conn)?;
 
-    // Accept the merge only if the combined ledger still balances.
+    // Report whether the combined ledger still balances. This cannot gate the
+    // commit: the checks read the projections, which only exist once the merged
+    // events are committed and replayed. So a failure here is a loud warning about
+    // an already-applied merge, not a veto — which is exactly why the caller takes
+    // a safety copy first.
     let checks = crate::reconciliation::run_all_checks(conn)?;
     if !crate::reconciliation::all_passed(&checks) {
         let failed: Vec<String> = checks
