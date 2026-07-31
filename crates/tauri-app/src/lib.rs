@@ -86,7 +86,11 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
+            // `CloseRequested`, not `Destroyed`: the latter fires during teardown,
+            // after the window is gone, so a `VACUUM INTO` of a large ledger can be
+            // cut short by the process exiting. Here the event loop is still alive
+            // and the write runs to completion before the window goes away.
+            if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let state = window.state::<AppState>();
                 match auto_backup_on_close(&state) {
                     Ok(true) => eprintln!("automatic backup written"),
