@@ -1,4 +1,4 @@
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use std::collections::HashMap;
 
 /// Allowed settings keys. `set_setting` rejects anything not listed here so a
@@ -10,9 +10,10 @@ pub const SETTING_KEYS: &[&str] = &[
     "theme",
     "locale",
     "font_size",
-    // Stable identity of this install. Authored into every event's HLC, so it
-    // must never change once minted. See ensure_device_id.
-    "device_id",
+    // NOTE: "device_id" is deliberately absent. It is written once by
+    // ensure_device_id and must never be writable through this generic path,
+    // which the frontend can drive with an arbitrary key. get_settings ignores
+    // this allowlist, so the UI can still read it.
     // Folder remembered from the last manual backup; auto-backup on close
     // writes here. Absent means "no automatic backups yet".
     "backup_folder",
@@ -54,16 +55,19 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Resul
 /// id), so it must be stable for the life of the install and unique across
 /// installs — otherwise two installs mint colliding event ids and clashing
 /// `(device_id, seq)` pairs, and logs cannot be merged.
+///
+/// Write-once by construction: the insert is `DO NOTHING` and the value is read
+/// back afterwards, so this can only ever *adopt* a stored id, never replace one.
+/// That also makes two racing callers converge on the same id instead of one
+/// returning an identity the database no longer records. Deliberately bypasses
+/// `set_setting`, since `device_id` is not — and must not be — allowlisted.
 pub fn ensure_device_id(conn: &Connection) -> rusqlite::Result<String> {
-    let existing: Option<String> = conn
-        .query_row("SELECT value FROM app_settings WHERE key = 'device_id'", [], |r| r.get(0))
-        .optional()?;
-    if let Some(id) = existing {
-        return Ok(id);
-    }
-    let id = uuid::Uuid::new_v4().to_string();
-    set_setting(conn, "device_id", &id)?;
-    Ok(id)
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES ('device_id', ?1)
+         ON CONFLICT(key) DO NOTHING",
+        [uuid::Uuid::new_v4().to_string()],
+    )?;
+    conn.query_row("SELECT value FROM app_settings WHERE key = 'device_id'", [], |r| r.get(0))
 }
 
 #[cfg(test)]
@@ -126,9 +130,61 @@ mod tests {
     }
 
     #[test]
-    fn device_id_is_an_allowed_key() {
+    fn device_id_cannot_be_written_through_set_setting() {
+        // set_setting is reachable from the frontend with an arbitrary key
+        // (tauri-app/src/commands.rs), and it upserts. If device_id were
+        // allowlisted, any caller could permanently overwrite this install's
+        // identity, orphaning every event it has already authored.
         let conn = open_in_memory_with_schema().unwrap();
-        set_setting(&conn, "device_id", "abc").expect("device_id must be allowlisted");
-        assert_eq!(ensure_device_id(&conn).unwrap(), "abc", "must reuse the stored value");
+        let minted = ensure_device_id(&conn).unwrap();
+        assert!(
+            set_setting(&conn, "device_id", "hijacked").is_err(),
+            "device_id must not be writable through the generic settings path"
+        );
+        assert_eq!(ensure_device_id(&conn).unwrap(), minted, "identity must be unchanged");
+    }
+
+    #[test]
+    fn ensure_device_id_reuses_a_preexisting_row() {
+        let conn = open_in_memory_with_schema().unwrap();
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('device_id', 'preexisting')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            ensure_device_id(&conn).unwrap(),
+            "preexisting",
+            "must adopt the stored id, never mint over it"
+        );
+    }
+
+    #[test]
+    fn distinct_installs_mint_distinct_ids() {
+        // The property the whole design rests on: uniqueness across installs.
+        // Idempotence alone would also hold for a hardcoded constant.
+        let a = open_in_memory_with_schema().unwrap();
+        let b = open_in_memory_with_schema().unwrap();
+        assert_ne!(
+            ensure_device_id(&a).unwrap(),
+            ensure_device_id(&b).unwrap(),
+            "two installs must not share an identity, or their event ids collide"
+        );
+    }
+
+    #[test]
+    fn device_id_survives_a_projection_rebuild() {
+        // Identity lives in app_settings precisely because that table is absent
+        // from PROJECTION_TABLES, while rebuild() runs on every startup. That
+        // coupling spans two files; this pins it. Adding "app_settings" to
+        // PROJECTION_TABLES would wipe every install's identity.
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let minted = ensure_device_id(&conn).unwrap();
+        crate::projectors::rebuild(&mut conn).unwrap();
+        assert_eq!(
+            ensure_device_id(&conn).unwrap(),
+            minted,
+            "rebuild must not clear app_settings"
+        );
     }
 }
