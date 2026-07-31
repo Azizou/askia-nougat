@@ -36,4 +36,5 @@ pub use queries::{
     MonthlyUnits, PartyBalance, ProfitAndLoss, ReturnRate, SellerRow, StockOnHand,
 };
 pub use settings::{ensure_device_id, get_settings, set_setting, SETTING_KEYS};
-pub use archive::{export_jsonl, ArchiveError, ImportSummary, ARCHIVE_FORMAT, ARCHIVE_VERSION};
+pub use archive::{export_jsonl, import_jsonl, ArchiveError, ArchiveHeader, ImportSummary,
+    ARCHIVE_FORMAT, ARCHIVE_VERSION};

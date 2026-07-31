@@ -209,12 +209,111 @@ pub fn parse_event(line: &str, line_no: usize) -> Result<LedgerEvent, ArchiveErr
     })
 }
 
+/// Merge an archive into this database, keyed by event id.
+///
+/// Events already present (same id) are skipped; the rest are inserted verbatim.
+/// All inserts happen in ONE transaction, so a damaged line or an identity
+/// collision leaves the log exactly as it was.
+///
+/// The replay and reconciliation that follow run AFTER that transaction commits,
+/// so they cannot roll it back: if `rebuild` or a balance check fails, this
+/// returns `Err` with the merged events already persisted, and the database is
+/// left with stale or partial projections. Callers must therefore take a
+/// snapshot before calling and restore it on error — an `Err` from here does not
+/// mean "nothing happened".
+///
+/// Deliberately does NOT touch `app_settings`. Merging someone else's log must
+/// not silently change your currency or locale, and overwriting `device_id`
+/// would destroy this install's identity. Whole-install recovery (settings
+/// included) is what a database snapshot restore is for.
+pub fn import_jsonl(
+    conn: &mut Connection,
+    reader: impl BufRead,
+) -> Result<ImportSummary, ArchiveError> {
+    let mut lines = reader.lines();
+
+    let header_line = lines
+        .next()
+        .transpose()?
+        .ok_or_else(|| ArchiveError::Format("the file is empty".into()))?;
+    let _header = parse_header(&header_line)?;
+
+    // Parse everything BEFORE opening the transaction: a damaged file should
+    // never reach the database at all.
+    let mut events: Vec<LedgerEvent> = Vec::new();
+    for (idx, line) in lines.enumerate() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue; // tolerate trailing newlines
+        }
+        events.push(parse_event(&line, idx + 2)?); // +2: 1-based, header is line 1
+    }
+    let total_events = events.len();
+
+    let tx = conn.transaction()?;
+    let mut inserted = 0usize;
+    let mut skipped_duplicates = 0usize;
+
+    for ev in &events {
+        let existing_id: Option<String> = tx
+            .query_row("SELECT id FROM events WHERE id = ?1", [&ev.id], |r| r.get(0))
+            .optional()?;
+        if existing_id.is_some() {
+            skipped_duplicates += 1;
+            continue;
+        }
+
+        // Same (device_id, seq) under a DIFFERENT id means two installs shared an
+        // identity. UNIQUE (device_id, seq) would reject it anyway; fail with an
+        // explanation instead of a raw constraint error.
+        let clashing: Option<String> = tx
+            .query_row(
+                "SELECT id FROM events WHERE device_id = ?1 AND seq = ?2",
+                rusqlite::params![ev.device_id, ev.seq],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(other) = clashing {
+            if other != ev.id {
+                return Err(ArchiveError::Collision {
+                    device_id: ev.device_id.clone(),
+                    seq: ev.seq,
+                });
+            }
+        }
+
+        insert_raw_event(&tx, ev)?;
+        inserted += 1;
+    }
+
+    tx.commit()?;
+
+    // Projections are derived state: replay the merged log in HLC order.
+    crate::projectors::rebuild(conn)?;
+
+    // Accept the merge only if the combined ledger still balances.
+    let checks = crate::reconciliation::run_all_checks(conn)?;
+    if !crate::reconciliation::all_passed(&checks) {
+        let failed: Vec<String> = checks
+            .iter()
+            .filter(|c| !matches!(c.outcome, crate::reconciliation::CheckOutcome::Pass))
+            .map(|c| c.name.to_string())
+            .collect();
+        return Err(ArchiveError::Reconciliation(failed.join(", ")));
+    }
+
+    Ok(ImportSummary { inserted, skipped_duplicates, total_events })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::open_in_memory_with_schema;
     use crate::events::append_event;
-    use crate::hlc::Hlc;
+    use crate::genesis::run_genesis;
+    use crate::hlc::{rehydrate_from_log, Hlc};
+    use crate::projectors::rebuild;
+    use crate::reconciliation::{all_passed, run_all_checks};
     use crate::settings::{ensure_device_id, set_setting};
     use serde_json::json;
 
@@ -327,5 +426,212 @@ mod tests {
             ArchiveError::Parse { line, .. } => assert_eq!(line, 7),
             other => panic!("expected Parse, got {other:?}"),
         }
+    }
+
+    // ---- import ----
+
+    /// A founded business under `device`, plus one `ItemDefined` per entry in
+    /// `items`, projections rebuilt.
+    ///
+    /// Genesis is essential, not decoration: `check_inventory_valuation` reads
+    /// the `inventory` account with a bare `query_row`, so `run_all_checks` on a
+    /// log without a chart of accounts fails with `QueryReturnedNoRows` rather
+    /// than a `Fail` outcome. Every import into such a log would error.
+    fn seeded_as(device: &str, items: &[&str]) -> Connection {
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new(device);
+        run_genesis(&conn, &mut hlc, 1000, device, "owner-1", "Jane Owner").unwrap();
+        let mut physical = 2000;
+        for it in items {
+            append_event(&conn, &mut hlc, physical, device, "u", "ItemDefined",
+                &json!({"itemId": it, "sku": it, "name": it, "unit": "ea"}))
+                .unwrap();
+            physical += 1000;
+        }
+        rebuild(&mut conn).unwrap();
+        conn
+    }
+
+    /// Copy `source`'s log verbatim into a fresh database, then append `items`
+    /// under `device` — a second install of the *same* business that has since
+    /// diverged. Two independent `run_genesis` runs cannot be merged at all:
+    /// replaying both would open two `inventory` accounts and violate the
+    /// unique index on `accounts.system_role`.
+    ///
+    /// Copies with `insert_raw_event` rather than `import_jsonl` so the fixture
+    /// does not depend on the function under test.
+    fn branch_of(source: &Connection, device: &str, items: &[&str]) -> Connection {
+        let mut conn = open_in_memory_with_schema().unwrap();
+        for ev in read_events(source).unwrap() {
+            insert_raw_event(&conn, &ev).unwrap();
+        }
+        let mut hlc = Hlc::new(device);
+        rehydrate_from_log(&conn, &mut hlc, 5000).unwrap();
+        let mut physical = 5000;
+        for it in items {
+            append_event(&conn, &mut hlc, physical, device, "u", "ItemDefined",
+                &json!({"itemId": it, "sku": it, "name": it, "unit": "ea"}))
+                .unwrap();
+            physical += 1000;
+        }
+        rebuild(&mut conn).unwrap();
+        conn
+    }
+
+    fn export_string(conn: &Connection) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        export_jsonl(conn, &mut buf, 1, "0.1.2").unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    fn event_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn import_into_empty_db_reproduces_identity_exactly() {
+        let source = seeded_as("devA", &["i1", "i2"]);
+        let text = export_string(&source);
+        let src_events = read_events(&source).unwrap();
+
+        let mut target = open_in_memory_with_schema().unwrap();
+        let summary = import_jsonl(&mut target, text.as_bytes()).unwrap();
+        assert_eq!(summary.inserted, src_events.len());
+        assert_eq!(summary.skipped_duplicates, 0);
+        assert_eq!(summary.total_events, src_events.len());
+
+        let got_events = read_events(&target).unwrap();
+        assert_eq!(got_events.len(), src_events.len());
+        for (a, b) in src_events.iter().zip(got_events.iter()) {
+            assert_eq!(a.id, b.id, "event id must survive the round trip");
+            assert_eq!(a.hlc, b.hlc);
+            assert_eq!(a.device_id, b.device_id);
+            assert_eq!(a.seq, b.seq);
+            assert_eq!(a.payload, b.payload);
+        }
+    }
+
+    #[test]
+    fn import_rebuilds_projections() {
+        let source = seeded_as("devA", &["i1", "i2"]);
+        let text = export_string(&source);
+        let mut target = open_in_memory_with_schema().unwrap();
+        import_jsonl(&mut target, text.as_bytes()).unwrap();
+
+        let n: i64 = target.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 2, "projections must be rebuilt from the merged log");
+        assert!(all_passed(&run_all_checks(&target).unwrap()));
+    }
+
+    #[test]
+    fn reimporting_the_same_archive_is_a_no_op() {
+        let source = seeded_as("devA", &["i1", "i2"]);
+        let text = export_string(&source);
+        let total = read_events(&source).unwrap().len();
+        let mut target = open_in_memory_with_schema().unwrap();
+        import_jsonl(&mut target, text.as_bytes()).unwrap();
+
+        let second = import_jsonl(&mut target, text.as_bytes()).unwrap();
+        assert_eq!(second.inserted, 0, "nothing new to insert");
+        assert_eq!(second.skipped_duplicates, total);
+        assert_eq!(event_count(&target), total as i64, "the log must not grow on re-import");
+    }
+
+    #[test]
+    fn merging_two_disjoint_logs_keeps_both() {
+        // One founded business, two installs that each recorded a different item.
+        let base = seeded_as("devBase", &[]);
+        let shared = read_events(&base).unwrap().len();
+        let a = branch_of(&base, "devA", &["i1"]);
+        let b = branch_of(&base, "devB", &["i2"]);
+
+        let mut target = open_in_memory_with_schema().unwrap();
+        import_jsonl(&mut target, export_string(&a).as_bytes()).unwrap();
+        let summary = import_jsonl(&mut target, export_string(&b).as_bytes()).unwrap();
+
+        assert_eq!(summary.inserted, 1, "only devB's own event is new");
+        assert_eq!(summary.skipped_duplicates, shared, "the shared genesis is already present");
+        assert_eq!(event_count(&target), shared as i64 + 2, "both branches must be present");
+
+        let events = read_events(&target).unwrap();
+        let hlcs: Vec<&str> = events.iter().map(|e| e.hlc.as_str()).collect();
+        let mut sorted = hlcs.clone();
+        sorted.sort_unstable();
+        assert_eq!(hlcs, sorted, "merged log must read back in HLC order");
+
+        let items: i64 =
+            target.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        assert_eq!(items, 2, "both installs' items must survive the merge");
+        assert!(all_passed(&run_all_checks(&target).unwrap()));
+    }
+
+    #[test]
+    fn colliding_device_seq_aborts_and_changes_nothing() {
+        let a = seeded_as("devA", &["i1"]);
+        let mut target = open_in_memory_with_schema().unwrap();
+        import_jsonl(&mut target, export_string(&a).as_bytes()).unwrap();
+        let before = event_count(&target);
+
+        // A rival install that also believes it is devA — the pre-UUID case. It
+        // authors at a later physical time, so its stamps (and therefore its
+        // event ids) differ while its `seq` values restart at 1 and collide.
+        let rival = open_in_memory_with_schema().unwrap();
+        let mut rival_hlc = Hlc::new("devA");
+        append_event(&rival, &mut rival_hlc, 9000, "devA", "u", "ItemDefined",
+            &json!({"itemId": "i9", "sku": "i9", "name": "i9", "unit": "ea"}))
+            .unwrap();
+
+        let err = import_jsonl(&mut target, export_string(&rival).as_bytes()).unwrap_err();
+        assert!(matches!(err, ArchiveError::Collision { .. }), "got {err:?}");
+        assert_eq!(before, event_count(&target), "a rejected import must leave the log untouched");
+    }
+
+    #[test]
+    fn import_never_overwrites_local_settings() {
+        let source = seeded_as("devA", &["i1"]);
+        set_setting(&source, "currency_symbol", "$").unwrap();
+        set_setting(&source, "locale", "en").unwrap();
+        let text = export_string(&source);
+
+        let mut target = open_in_memory_with_schema().unwrap();
+        let local_id = ensure_device_id(&target).unwrap();
+        set_setting(&target, "currency_symbol", "€").unwrap();
+        import_jsonl(&mut target, text.as_bytes()).unwrap();
+
+        let s = get_settings(&target).unwrap();
+        assert_eq!(s.get("currency_symbol").map(String::as_str), Some("€"), "must keep local currency");
+        assert_eq!(s.get("device_id"), Some(&local_id), "device identity must never be replaced");
+        assert_eq!(s.get("locale"), None, "must not import the source's locale");
+    }
+
+    #[test]
+    fn import_rejects_a_damaged_line_without_partial_writes() {
+        let source = seeded_as("devA", &["i1", "i2"]);
+        let text = export_string(&source);
+        let mut lines: Vec<&str> = text.lines().collect();
+        lines[2] = "{ this line is broken";
+        let damaged = lines.join("\n");
+
+        let mut target = open_in_memory_with_schema().unwrap();
+        let err = import_jsonl(&mut target, damaged.as_bytes()).unwrap_err();
+        assert!(matches!(err, ArchiveError::Parse { .. }), "got {err:?}");
+        assert_eq!(event_count(&target), 0, "a damaged archive must insert nothing at all");
+    }
+
+    #[test]
+    fn import_rejects_an_empty_file() {
+        let mut target = open_in_memory_with_schema().unwrap();
+        let err = import_jsonl(&mut target, &b""[..]).unwrap_err();
+        assert!(matches!(err, ArchiveError::Format(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn import_tolerates_a_trailing_blank_line() {
+        let source = seeded_as("devA", &["i1"]);
+        let total = read_events(&source).unwrap().len();
+        let text = format!("{}\n\n", export_string(&source).trim_end());
+        let mut target = open_in_memory_with_schema().unwrap();
+        let summary = import_jsonl(&mut target, text.as_bytes()).unwrap();
+        assert_eq!(summary.inserted, total);
     }
 }
