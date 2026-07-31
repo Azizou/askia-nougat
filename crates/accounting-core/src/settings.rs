@@ -109,7 +109,10 @@ mod tests {
     fn ensure_device_id_mints_and_persists() {
         let conn = open_in_memory_with_schema().unwrap();
         let id = ensure_device_id(&conn).unwrap();
-        assert_eq!(id.len(), 36, "expected a hyphenated UUID v4, got {id:?}");
+        // Parse rather than check the length: a 36-char string is not necessarily
+        // a UUID, and a malformed device id silently corrupts event identity.
+        let parsed = uuid::Uuid::parse_str(&id).expect("device id must be a valid UUID");
+        assert_eq!(parsed.get_version_num(), 4, "device id must be a UUID v4, got {id:?}");
         let stored = get_settings(&conn).unwrap();
         assert_eq!(stored.get("device_id"), Some(&id));
     }
