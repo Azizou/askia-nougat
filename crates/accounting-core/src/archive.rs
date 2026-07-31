@@ -111,8 +111,14 @@ pub fn export_jsonl(
     exported_at: i64,
     app_version: &str,
 ) -> Result<usize, ArchiveError> {
-    let settings: HashMap<String, String> = get_settings(conn)?;
+    let mut settings: HashMap<String, String> = get_settings(conn)?;
     let device_id = settings.get("device_id").cloned().unwrap_or_default();
+
+    // An export is the file a user emails to whoever is helping them, so keep
+    // local filesystem paths out of it. `backup_folder` records where this
+    // machine keeps its backups — of no archival value, since import never
+    // applies the header's settings, and it discloses a home directory layout.
+    settings.remove("backup_folder");
 
     let header = serde_json::json!({
         "format": ARCHIVE_FORMAT,
@@ -547,6 +553,25 @@ mod tests {
         }
         rebuild(&mut conn).unwrap();
         conn
+    }
+
+    /// An export is shared with other people, so it must not carry local
+    /// filesystem paths. `currency_symbol` is kept as the control: the header is
+    /// still meant to record what the exporting install looked like.
+    #[test]
+    fn export_header_omits_local_filesystem_paths() {
+        let conn = seeded();
+        set_setting(&conn, "backup_folder", "/Users/someone/private/Documents/backups").unwrap();
+
+        let archive = export_to_string(&conn);
+        let header = archive.lines().next().unwrap();
+
+        assert!(
+            !header.contains("/Users/someone"),
+            "the export header must not disclose local paths: {header}"
+        );
+        assert!(!header.contains("backup_folder"), "the key itself should be gone: {header}");
+        assert!(header.contains("currency_symbol"), "other settings must still be recorded");
     }
 
     /// A log from a different business must be refused BEFORE anything is
