@@ -16,11 +16,12 @@ fn now_ms() -> u64 {
 
 macro_rules! with_ctx {
     ($state:expr, |$ctx:ident| $body:expr) => {{
+        let device_id = $state.device_id.clone();
         let mut db = $state.db.lock().unwrap();
         let crate::state::Db { ref mut conn, ref mut hlc } = *db;
         let mut $ctx = CommandContext {
             conn, hlc, physical_now: now_ms(),
-            device_id: "device-1".into(), user_id: "owner-1".into(),
+            device_id, user_id: "owner-1".into(),
         };
         $body
     }};

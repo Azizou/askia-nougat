@@ -2,7 +2,7 @@ mod commands;
 mod error;
 mod state;
 
-use accounting_core::{apply_schema, ensure_walkin_party, rebuild, Hlc, rehydrate_from_log, run_genesis};
+use accounting_core::{apply_schema, ensure_device_id, ensure_walkin_party, rebuild, Hlc, rehydrate_from_log, run_genesis};
 use state::AppState;
 use std::fs;
 use std::path::PathBuf;
@@ -24,24 +24,28 @@ fn init_state(app_data_dir: PathBuf) -> AppState {
     conn.pragma_update(None, "foreign_keys", "ON").ok();
     apply_schema(&conn).expect("apply schema");
 
-    let mut hlc = Hlc::new("device-1");
+    // Mint or read this install's identity BEFORE rehydrating the clock: the
+    // clock must know its own device id before it seeds from the log's max HLC.
+    let device_id = ensure_device_id(&conn).expect("ensure device id");
+
+    let mut hlc = Hlc::new(device_id.clone());
     rehydrate_from_log(&conn, &mut hlc, now_ms()).expect("rehydrate hlc");
 
     let event_count: i64 = conn.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
     if event_count == 0 {
-        run_genesis(&conn, &mut hlc, now_ms(), "device-1", "owner-1", "Owner").expect("genesis");
+        run_genesis(&conn, &mut hlc, now_ms(), &device_id, "owner-1", "Owner").expect("genesis");
     }
 
     // Idempotently ensure the shared walk-in customer exists (covers both
     // fresh installs and installs whose genesis predates this party). Must run
     // before rebuild so the event is projected this startup.
-    ensure_walkin_party(&conn, &mut hlc, now_ms(), "device-1").expect("seed walk-in party");
+    ensure_walkin_party(&conn, &mut hlc, now_ms(), &device_id).expect("seed walk-in party");
 
     // Always rebuild projections on startup — ensures genesis events are projected
     // and recovers from any interrupted prior session.
     rebuild(&mut conn).expect("rebuild projections");
 
-    AppState::new(conn, hlc)
+    AppState::new(conn, hlc, device_id)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

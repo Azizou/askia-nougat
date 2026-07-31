@@ -12,10 +12,13 @@ pub struct Db {
 /// eliminating any lock-ordering concern (single-device, single-writer).
 pub struct AppState {
     pub db: Mutex<Db>,
+    /// This install's stable identity, authored into every event. Read once at
+    /// startup so commands never re-query it.
+    pub device_id: String,
 }
 
 impl AppState {
-    pub fn new(conn: Connection, hlc: Hlc) -> Self {
-        Self { db: Mutex::new(Db { conn, hlc }) }
+    pub fn new(conn: Connection, hlc: Hlc, device_id: String) -> Self {
+        Self { db: Mutex::new(Db { conn, hlc }), device_id }
     }
 }
