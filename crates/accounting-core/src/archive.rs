@@ -122,6 +122,93 @@ pub fn export_jsonl(
     Ok(events.len())
 }
 
+/// The first line of an archive.
+#[derive(Debug, Clone)]
+pub struct ArchiveHeader {
+    pub version: u32,
+    pub exported_at: i64,
+    pub device_id: String,
+    /// The exporting install's `app_settings`. Archival only — merge import
+    /// never applies these (see `import_jsonl`).
+    pub settings: HashMap<String, String>,
+}
+
+/// Parse and validate the header line.
+///
+/// Rejects anything without our format marker, and any version this build does
+/// not understand — better a clear refusal than a silent misread of a newer file.
+pub fn parse_header(line: &str) -> Result<ArchiveHeader, ArchiveError> {
+    let v: serde_json::Value = serde_json::from_str(line)
+        .map_err(|e| ArchiveError::Format(format!("the first line is not valid JSON ({e})")))?;
+
+    match v.get("format").and_then(|f| f.as_str()) {
+        Some(ARCHIVE_FORMAT) => {}
+        Some(other) => {
+            return Err(ArchiveError::Format(format!(
+                "expected an {ARCHIVE_FORMAT} file but found '{other}'"
+            )))
+        }
+        None => return Err(ArchiveError::Format("no format marker on the first line".into())),
+    }
+
+    let version = v.get("version").and_then(|x| x.as_u64()).unwrap_or(0) as u32;
+    if version != ARCHIVE_VERSION {
+        return Err(ArchiveError::Format(format!(
+            "this file is version {version} but this app understands version {ARCHIVE_VERSION}"
+        )));
+    }
+
+    let settings = v
+        .get("settings")
+        .and_then(|s| s.as_object())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, val)| val.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(ArchiveHeader {
+        version,
+        exported_at: v.get("exported_at").and_then(|x| x.as_i64()).unwrap_or(0),
+        device_id: v.get("device_id").and_then(|x| x.as_str()).unwrap_or_default().to_string(),
+        settings,
+    })
+}
+
+/// Parse one event line. `line_no` is 1-based and only used for error reporting.
+pub fn parse_event(line: &str, line_no: usize) -> Result<LedgerEvent, ArchiveError> {
+    let v: serde_json::Value = serde_json::from_str(line)
+        .map_err(|e| ArchiveError::Parse { line: line_no, message: e.to_string() })?;
+
+    fn text(v: &serde_json::Value, key: &str, line_no: usize) -> Result<String, ArchiveError> {
+        v.get(key)
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| ArchiveError::Parse {
+                line: line_no,
+                message: format!("missing text field '{key}'"),
+            })
+    }
+    fn number(v: &serde_json::Value, key: &str, line_no: usize) -> Result<i64, ArchiveError> {
+        v.get(key).and_then(|x| x.as_i64()).ok_or_else(|| ArchiveError::Parse {
+            line: line_no,
+            message: format!("missing numeric field '{key}'"),
+        })
+    }
+
+    Ok(LedgerEvent {
+        id: text(&v, "id", line_no)?,
+        hlc: text(&v, "hlc", line_no)?,
+        device_id: text(&v, "device_id", line_no)?,
+        user_id: text(&v, "user_id", line_no)?,
+        seq: number(&v, "seq", line_no)?,
+        event_type: text(&v, "type", line_no)?,
+        payload: v.get("payload").cloned().unwrap_or(serde_json::Value::Null),
+        created_at: number(&v, "created_at", line_no)?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +280,52 @@ mod tests {
         let n = export_jsonl(&conn, &mut buf, 1, "0.1.2").unwrap();
         assert_eq!(n, 0);
         assert_eq!(String::from_utf8(buf).unwrap().lines().count(), 1);
+    }
+
+    #[test]
+    fn parse_header_accepts_a_valid_header() {
+        let line = r#"{"format":"accounting-eventlog","version":1,"settings":{"locale":"fr"}}"#;
+        let h = parse_header(line).unwrap();
+        assert_eq!(h.version, 1);
+        assert_eq!(h.settings.get("locale").map(String::as_str), Some("fr"));
+    }
+
+    #[test]
+    fn parse_header_rejects_a_foreign_format() {
+        let err = parse_header(r#"{"format":"something-else","version":1}"#).unwrap_err();
+        assert!(matches!(err, ArchiveError::Format(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_header_rejects_a_future_version() {
+        let err = parse_header(r#"{"format":"accounting-eventlog","version":99}"#).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("99"), "error should name the unsupported version: {msg}");
+    }
+
+    #[test]
+    fn parse_header_rejects_non_json() {
+        let err = parse_header("this is not json").unwrap_err();
+        assert!(matches!(err, ArchiveError::Format(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_event_reads_all_fields() {
+        let line = r#"{"id":"h1","hlc":"h1","device_id":"d","user_id":"u","seq":3,"type":"A","payload":{"x":1},"created_at":9}"#;
+        let ev = parse_event(line, 2).unwrap();
+        assert_eq!(ev.id, "h1");
+        assert_eq!(ev.seq, 3);
+        assert_eq!(ev.event_type, "A");
+        assert_eq!(ev.payload["x"], 1);
+        assert_eq!(ev.created_at, 9);
+    }
+
+    #[test]
+    fn parse_event_reports_the_line_number_on_damage() {
+        let err = parse_event(r#"{"id":"h1","seq":"not-a-number"}"#, 7).unwrap_err();
+        match err {
+            ArchiveError::Parse { line, .. } => assert_eq!(line, 7),
+            other => panic!("expected Parse, got {other:?}"),
+        }
     }
 }
