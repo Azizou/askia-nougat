@@ -460,6 +460,26 @@ pub fn restore_database(
     // copied its bytes into `live`, removing the rescue copy is harmless.
     let _ = crate::backup::prune(&rescue, crate::backup::RESCUE_PREFIX, crate::backup::KEEP_AUTO);
 
+    // A snapshot is a copy of the whole file, `app_settings` included, so a backup
+    // made by another install carries that install's `device_id`. Adopting it would
+    // make two installs author under one identity — byte-identical event ids for
+    // different events, colliding `(device_id, seq)` — which is precisely the
+    // unmergeable state per-install identity exists to prevent. So re-mint when the
+    // restored id is not the one this session has been running under.
+    //
+    // Restoring this install's own backup keeps its id: `device_id` is write-once,
+    // so any snapshot of this install necessarily carries this install's id, and
+    // that continuity is worth preserving. Events already in the restored log keep
+    // whatever id authored them; only future events need an unshared identity.
+    use rusqlite::OptionalExtension;
+    let reopened = rusqlite::Connection::open(&live)?;
+    let restored_id: Option<String> = reopened
+        .query_row("SELECT value FROM app_settings WHERE key = 'device_id'", [], |r| r.get(0))
+        .optional()?;
+    if restored_id.as_deref() != Some(state.device_id.as_str()) {
+        accounting_core::remint_device_id(&reopened)?;
+    }
+
     Ok(RestoreResult { rescue_path: rescue_path.to_string_lossy().into_owned() })
 }
 

@@ -61,6 +61,10 @@ pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Resul
 /// That also makes two racing callers converge on the same id instead of one
 /// returning an identity the database no longer records. Deliberately bypasses
 /// `set_setting`, since `device_id` is not — and must not be — allowlisted.
+///
+/// One deliberate exception exists: `remint_device_id`, called after restoring a
+/// snapshot taken by a *different* install, whose `app_settings` would otherwise
+/// hand this install that install's identity.
 pub fn ensure_device_id(conn: &Connection) -> rusqlite::Result<String> {
     conn.execute(
         "INSERT INTO app_settings (key, value) VALUES ('device_id', ?1)
@@ -70,10 +74,67 @@ pub fn ensure_device_id(conn: &Connection) -> rusqlite::Result<String> {
     conn.query_row("SELECT value FROM app_settings WHERE key = 'device_id'", [], |r| r.get(0))
 }
 
+/// Replace this install's `device_id` with a freshly minted one.
+///
+/// The single legitimate exception to the write-once rule above, and it exists
+/// because a snapshot restore copies the *whole* database file — `app_settings`
+/// included. Restoring another install's backup would otherwise make this install
+/// author under that install's UUID, so both would mint byte-identical event ids
+/// for different events and collide on `(device_id, seq)`: exactly the
+/// unmergeable state per-install identity was introduced to prevent.
+///
+/// Call this only when the restored identity is known to belong to a different
+/// install. Restoring this install's own backup carries its own id back, and that
+/// continuity is worth keeping — `device_id` is write-once, so any snapshot of
+/// this install necessarily holds this install's id.
+///
+/// Events already in the log keep the device id they were authored under. That is
+/// correct: their ids are historical facts, and only newly authored events need to
+/// come from an identity nobody else holds.
+pub fn remint_device_id(conn: &Connection) -> rusqlite::Result<String> {
+    let fresh = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO app_settings (key, value) VALUES ('device_id', ?1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [&fresh],
+    )?;
+    Ok(fresh)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::open_in_memory_with_schema;
+
+    #[test]
+    fn remint_replaces_a_restored_foreign_identity() {
+        let conn = open_in_memory_with_schema().unwrap();
+        let original = ensure_device_id(&conn).unwrap();
+
+        let fresh = remint_device_id(&conn).unwrap();
+        assert_ne!(fresh, original, "reminting must produce a different id");
+        assert_eq!(
+            uuid::Uuid::parse_str(&fresh).unwrap().get_version_num(),
+            4,
+            "the replacement must be a real UUID v4, like the original"
+        );
+
+        // The stored value must be the new one, and ensure_device_id must now
+        // adopt it rather than mint again.
+        assert_eq!(ensure_device_id(&conn).unwrap(), fresh);
+    }
+
+    #[test]
+    fn remint_still_cannot_be_reached_through_set_setting() {
+        // remint_device_id is deliberately a separate function: adding device_id
+        // to SETTING_KEYS would reopen the IPC hole that b0d5cae closed.
+        let conn = open_in_memory_with_schema().unwrap();
+        ensure_device_id(&conn).unwrap();
+        assert!(
+            set_setting(&conn, "device_id", "attacker-supplied").is_err(),
+            "device_id must stay unwritable through the generic settings path"
+        );
+    }
 
     #[test]
     fn set_then_get_round_trips() {
