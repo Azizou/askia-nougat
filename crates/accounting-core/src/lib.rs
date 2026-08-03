@@ -7,12 +7,13 @@ pub mod commands;
 pub mod reconciliation;
 pub mod queries;
 pub mod settings;
+pub mod archive;
 #[cfg(test)]
 mod test_support;
 
 pub use db::{apply_schema, open_in_memory, open_in_memory_with_schema};
 pub use hlc::{rehydrate_from_log, Hlc};
-pub use events::{append_event, missing_seqs, read_events, LedgerEvent};
+pub use events::{append_event, insert_raw_event, missing_seqs, read_events, LedgerEvent};
 pub use genesis::{ensure_walkin_party, run_genesis, SYSTEM_USER_ID, WALKIN_PARTY_ID};
 pub use projectors::{apply_event, rebuild};
 pub use commands::{CommandContext, CommandError};
@@ -34,4 +35,6 @@ pub use queries::{
     AgeAtSale, AgingBucket, AgingInvoice, BalanceSheet, GrossProfit, ItemMargin, LotAge,
     MonthlyUnits, PartyBalance, ProfitAndLoss, ReturnRate, SellerRow, StockOnHand,
 };
-pub use settings::{get_settings, set_setting, SETTING_KEYS};
+pub use settings::{ensure_device_id, get_settings, remint_device_id, set_setting, SETTING_KEYS};
+pub use archive::{export_jsonl, import_jsonl, ArchiveError, ArchiveHeader, ImportSummary,
+    ARCHIVE_FORMAT, ARCHIVE_VERSION};

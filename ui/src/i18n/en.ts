@@ -158,6 +158,23 @@ export const en: Translations = {
     currencyDecimals: "Decimals",
     currencyPreview: "Preview",
     saved: "Preference saved.",
+    data: "Data",
+    backupNow: "Back up now",
+    backupDone: "Backup saved.",
+    restore: "Restore from backup",
+    restoreConfirm:
+      "Replace all current data with this backup? A safety copy of your current data will be kept.",
+    restoreDone: "Restore complete. Please close and reopen the app.",
+    exportLog: "Export event log",
+    exportDone: "Event log exported.",
+    importLog: "Import event log",
+    importConfirm:
+      "Merge this event log into your data? Entries already present will be skipped.",
+    importDone: "Import complete.",
+    lastBackup: "Last backup",
+    neverBackedUp: "Never",
+    chooseFolder: "Choose a folder",
+    chooseFile: "Choose a file",
   },
   faq: {
     title: "Help & FAQ",

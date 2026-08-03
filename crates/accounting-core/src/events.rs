@@ -54,6 +54,30 @@ pub fn append_event(
     })
 }
 
+/// Insert an event **verbatim**, preserving its `id`, `hlc`, `device_id`,
+/// `user_id`, `seq` and `created_at` exactly as authored elsewhere.
+///
+/// This is the import path for a foreign log; it is NOT a command path. Unlike
+/// `append_event` it mints nothing, which is the whole point: a merged event must
+/// keep the identity it was created with, or it would be indistinguishable from a
+/// new local event and would be re-imported forever.
+///
+/// Errors if `id` already exists (PRIMARY KEY) or if `(device_id, seq)` is already
+/// taken (UNIQUE) — callers are expected to check both first and report the
+/// difference to the user.
+pub fn insert_raw_event(conn: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
+    let payload_str = ev.payload.to_string();
+    conn.execute(
+        "INSERT INTO events (id, hlc, device_id, user_id, seq, type, payload, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, jsonb(?7), ?8)",
+        rusqlite::params![
+            ev.id, ev.hlc, ev.device_id, ev.user_id, ev.seq, ev.event_type,
+            payload_str, ev.created_at
+        ],
+    )?;
+    Ok(())
+}
+
 /// Read every event in deterministic replay order (by HLC ascending).
 pub fn read_events(conn: &Connection) -> rusqlite::Result<Vec<LedgerEvent>> {
     let mut stmt = conn.prepare(
@@ -156,5 +180,70 @@ mod tests {
         }
         let gaps = missing_seqs(&conn, "deviceA").unwrap();
         assert_eq!(gaps, vec![2], "seq 2 should be reported missing");
+    }
+
+    #[test]
+    fn insert_raw_event_preserves_identity_verbatim() {
+        let conn = open_in_memory_with_schema().unwrap();
+        let ev = LedgerEvent {
+            id: "000000000001000:000000:devB".into(),
+            hlc: "000000000001000:000000:devB".into(),
+            device_id: "devB".into(),
+            user_id: "userZ".into(),
+            seq: 7,
+            event_type: "ItemDefined".into(),
+            payload: json!({"itemId": "i9", "sku": "SKU-9"}),
+            created_at: 4242,
+        };
+        insert_raw_event(&conn, &ev).unwrap();
+
+        let got = read_events(&conn).unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, ev.id, "id must not be re-minted");
+        assert_eq!(got[0].hlc, ev.hlc);
+        assert_eq!(got[0].device_id, "devB");
+        assert_eq!(got[0].seq, 7, "seq must be preserved, not recomputed");
+        assert_eq!(got[0].created_at, 4242);
+        assert_eq!(got[0].payload, ev.payload, "payload must round-trip as JSON");
+    }
+
+    #[test]
+    fn insert_raw_event_rejects_duplicate_id() {
+        let conn = open_in_memory_with_schema().unwrap();
+        let ev = LedgerEvent {
+            id: "000000000001000:000000:devB".into(),
+            hlc: "000000000001000:000000:devB".into(),
+            device_id: "devB".into(),
+            user_id: "u".into(),
+            seq: 1,
+            event_type: "A".into(),
+            payload: json!({}),
+            created_at: 1,
+        };
+        insert_raw_event(&conn, &ev).unwrap();
+        assert!(insert_raw_event(&conn, &ev).is_err(), "PRIMARY KEY must reject a repeat id");
+    }
+
+    #[test]
+    fn insert_raw_event_rejects_duplicate_device_seq() {
+        let conn = open_in_memory_with_schema().unwrap();
+        let a = LedgerEvent {
+            id: "000000000001000:000000:devB".into(),
+            hlc: "000000000001000:000000:devB".into(),
+            device_id: "devB".into(),
+            user_id: "u".into(),
+            seq: 1,
+            event_type: "A".into(),
+            payload: json!({}),
+            created_at: 1,
+        };
+        let mut b = a.clone();
+        b.id = "000000000002000:000000:devB".into();
+        b.hlc = b.id.clone();
+        insert_raw_event(&conn, &a).unwrap();
+        assert!(
+            insert_raw_event(&conn, &b).is_err(),
+            "UNIQUE (device_id, seq) must reject a second seq 1 for devB"
+        );
     }
 }

@@ -1,7 +1,9 @@
 import { useToast } from "../theme";
 import { useI18n } from "../i18n";
 import { useSettings } from "../settings";
-import { formatMoney } from "../lib";
+import { formatMoney, errorMessage } from "../lib";
+import { invoke } from "@tauri-apps/api/core";
+import { confirm, open } from "@tauri-apps/plugin-dialog";
 
 const DECIMALS = ["0", "2"] as const;
 
@@ -13,6 +15,65 @@ export function Preferences() {
   const update = async (key: string, value: string) => {
     await set(key, value);
     toast.push(t.preferences.saved);
+  };
+
+  const backupNow = async () => {
+    const dir = await open({ directory: true, title: t.preferences.chooseFolder });
+    if (typeof dir !== "string") return;
+    try {
+      const r = await invoke<{ at: number }>("backup_database", { destDir: dir });
+      // Rust wrote these two settings; mirror them into the settings context so
+      // the "last backup" line updates without a relaunch.
+      await set("backup_folder", dir);
+      await set("last_backup_at", String(r.at));
+      toast.push(t.preferences.backupDone);
+    } catch (e: unknown) {
+      toast.push(errorMessage(e), "error");
+    }
+  };
+
+  const restore = async () => {
+    const file = await open({
+      title: t.preferences.chooseFile,
+      filters: [{ name: "Backup", extensions: ["db"] }],
+    });
+    if (typeof file !== "string") return;
+    if (!(await confirm(t.preferences.restoreConfirm, { kind: "warning" }))) return;
+    try {
+      await invoke("restore_database", { srcPath: file });
+      toast.push(t.preferences.restoreDone);
+    } catch (e: unknown) {
+      toast.push(errorMessage(e), "error");
+    }
+  };
+
+  const exportLog = async () => {
+    const dir = await open({ directory: true, title: t.preferences.chooseFolder });
+    if (typeof dir !== "string") return;
+    try {
+      await invoke("export_event_log", { destDir: dir });
+      toast.push(t.preferences.exportDone);
+    } catch (e: unknown) {
+      toast.push(errorMessage(e), "error");
+    }
+  };
+
+  const importLog = async () => {
+    const file = await open({
+      title: t.preferences.chooseFile,
+      filters: [{ name: "Event log", extensions: ["jsonl"] }],
+    });
+    if (typeof file !== "string") return;
+    if (!(await confirm(t.preferences.importConfirm, { kind: "warning" }))) return;
+    try {
+      const r = await invoke<{ inserted: number; skipped_duplicates: number }>(
+        "import_event_log",
+        { srcPath: file },
+      );
+      toast.push(`${t.preferences.importDone} (+${r.inserted}, ${r.skipped_duplicates})`);
+    } catch (e: unknown) {
+      toast.push(errorMessage(e), "error");
+    }
   };
 
   const previewCurrency = {
@@ -94,6 +155,22 @@ export function Preferences() {
         <p className="muted">
           {t.preferences.currencyPreview}: {formatMoney(123456, previewCurrency)}
         </p>
+      </section>
+
+      <section className="panel">
+        <h2 style={{ marginTop: 0 }}>{t.preferences.data}</h2>
+        <p className="muted">
+          {t.preferences.lastBackup}:{" "}
+          {settings.last_backup_at
+            ? new Date(Number(settings.last_backup_at)).toLocaleString(settings.locale)
+            : t.preferences.neverBackedUp}
+        </p>
+        <div className="form-row">
+          <button onClick={backupNow}>{t.preferences.backupNow}</button>
+          <button onClick={restore}>{t.preferences.restore}</button>
+          <button onClick={exportLog}>{t.preferences.exportLog}</button>
+          <button onClick={importLog}>{t.preferences.importLog}</button>
+        </div>
       </section>
     </div>
   );

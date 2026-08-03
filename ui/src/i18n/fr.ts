@@ -156,6 +156,23 @@ export const fr = {
     currencyDecimals: "Décimales",
     currencyPreview: "Aperçu",
     saved: "Préférence enregistrée.",
+    data: "Données",
+    backupNow: "Sauvegarder maintenant",
+    backupDone: "Sauvegarde enregistrée.",
+    restore: "Restaurer une sauvegarde",
+    restoreConfirm:
+      "Remplacer toutes les données actuelles par cette sauvegarde ? Une copie de sécurité de vos données actuelles sera conservée.",
+    restoreDone: "Restauration terminée. Veuillez fermer et rouvrir l'application.",
+    exportLog: "Exporter le journal",
+    exportDone: "Journal exporté.",
+    importLog: "Importer un journal",
+    importConfirm:
+      "Fusionner ce journal avec vos données ? Les écritures déjà présentes seront ignorées.",
+    importDone: "Import terminé.",
+    lastBackup: "Dernière sauvegarde",
+    neverBackedUp: "Jamais",
+    chooseFolder: "Choisir un dossier",
+    chooseFile: "Choisir un fichier",
   },
   faq: {
     title: "Aide & FAQ",

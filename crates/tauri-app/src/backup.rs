@@ -1,0 +1,826 @@
+//! Local snapshot backup, restore, and retention.
+//!
+//! Backups use `VACUUM INTO`, never a file copy: the live database runs in WAL
+//! mode, so copying `ledger.db` alone can capture a torn state with unmerged
+//! `-wal` content. `VACUUM INTO` writes one consistent, compacted file.
+
+use rusqlite::Connection;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Prefix for backups the user asked for. Never pruned.
+pub const MANUAL_PREFIX: &str = "ledger-";
+/// Prefix for backups written automatically on app close. Pruned to `KEEP_AUTO`.
+pub const AUTO_PREFIX: &str = "ledger-auto-";
+/// Prefix for the safety copy taken before a restore or import.
+pub const RESCUE_PREFIX: &str = "pre-restore-";
+/// How many automatic backups and rescue copies to keep.
+///
+/// Three, not ten, for the automatic backups: the event log is append-only, so
+/// each successive snapshot is a strict superset of the previous one. Extra
+/// copies are nested prefixes of one history, not independent versions, so they
+/// buy very little.
+///
+/// That reasoning does NOT hold for `RESCUE_PREFIX` copies, which share this
+/// constant. A restore or merge-import replaces or diverges history rather than
+/// appending to it, so a rescue copy taken after one is not a superset of the one
+/// taken before — each is a genuinely different ledger, and keeping three means
+/// three undo steps. Three is still the chosen depth; it just isn't free here,
+/// which is why the rescue copies are pruned only after their consumer has
+/// finished reading (see `perform_restore` and `import_event_log`).
+pub const KEEP_AUTO: usize = 3;
+
+/// Format a Unix-ms timestamp as `YYYYMMDD-HHMMSS` (UTC).
+///
+/// Hand-rolled because the project has no date dependency, and a backup
+/// filename does not justify adding one. Uses the civil-from-days algorithm
+/// (Howard Hinnant), valid for all dates after 1970.
+pub fn timestamp_utc(unix_ms: i64) -> String {
+    let secs = unix_ms.div_euclid(1000);
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400);
+    let (hh, mm, ss) = (tod / 3600, (tod % 3600) / 60, tod % 60);
+
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{y:04}{m:02}{d:02}-{hh:02}{mm:02}{ss:02}")
+}
+
+/// Build the snapshot filename for a backup of the given kind.
+pub fn snapshot_name(prefix: &str, unix_ms: i64) -> String {
+    format!("{prefix}{}.db", timestamp_utc(unix_ms))
+}
+
+/// Write a consistent snapshot of `conn`'s database to `dest`.
+///
+/// `VACUUM INTO` refuses to overwrite, so `dest` must not exist — callers use a
+/// fresh timestamped name. Returns the size of the written file in bytes.
+pub fn snapshot_to(conn: &Connection, dest: &Path) -> rusqlite::Result<u64> {
+    // Bound parameter, not string interpolation — the path is user-supplied.
+    conn.execute("VACUUM INTO ?1", [dest.to_string_lossy().as_ref()])?;
+    Ok(fs::metadata(dest).map(|m| m.len()).unwrap_or(0))
+}
+
+/// Delete all but the newest `keep` files in `dir` whose name starts with
+/// `prefix` and ends with `.db`.
+///
+/// Names embed a sortable UTC timestamp, so lexical order is chronological.
+/// Returns the paths removed.
+pub fn prune(dir: &Path, prefix: &str, keep: usize) -> std::io::Result<Vec<PathBuf>> {
+    let mut matching: Vec<PathBuf> = fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with(prefix) && n.ends_with(".db"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    matching.sort();
+    let mut removed = Vec::new();
+    if matching.len() > keep {
+        for path in &matching[..matching.len() - keep] {
+            fs::remove_file(path)?;
+            removed.push(path.clone());
+        }
+    }
+    Ok(removed)
+}
+
+/// Why a candidate file cannot be restored.
+#[derive(Debug)]
+pub struct InvalidCandidate(pub String);
+
+impl std::fmt::Display for InvalidCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for InvalidCandidate {}
+
+/// Check a candidate backup **before** the live database is touched.
+///
+/// Requires: the file exists, opens as SQLite, passes `integrity_check`, has an
+/// `events` table, and holds at least one event. Opened read-only so validation
+/// can never modify the candidate.
+pub fn validate_candidate(path: &Path) -> Result<(), InvalidCandidate> {
+    if !path.exists() {
+        return Err(InvalidCandidate("the file no longer exists".into()));
+    }
+
+    let uri = format!("file:{}?mode=ro", path.to_string_lossy());
+    let conn = Connection::open_with_flags(
+        &uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| InvalidCandidate(format!("this file is not a valid backup ({e})")))?;
+
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .map_err(|e| InvalidCandidate(format!("this file is not a valid backup ({e})")))?;
+    if integrity != "ok" {
+        return Err(InvalidCandidate(format!("this backup is damaged ({integrity})")));
+    }
+
+    let has_events: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='events'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| InvalidCandidate(format!("this file is not a valid backup ({e})")))?;
+    if has_events == 0 {
+        return Err(InvalidCandidate("this file is not an accounting backup".into()));
+    }
+
+    let events: i64 = conn
+        .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+        .map_err(|e| InvalidCandidate(format!("this backup cannot be read ({e})")))?;
+    if events == 0 {
+        return Err(InvalidCandidate("this backup contains no records".into()));
+    }
+
+    Ok(())
+}
+
+/// Replace `live` with `candidate` and delete the stale WAL sidecars.
+///
+/// The caller MUST have dropped every connection to `live` first.
+///
+/// Deleting `-wal` / `-shm` is mandatory, not tidiness: they belong to the file
+/// being replaced. Left in place, SQLite may replay the OLD write-ahead log on
+/// top of the NEW database and corrupt it.
+///
+/// Refuses a self-restore. The file dialog lets the user pick the live ledger
+/// itself, and it passes every `validate_candidate` check because it genuinely
+/// is a valid database — but `fs::copy(p, p)` truncates `p` to zero bytes and
+/// still returns `Ok`, and the sidecar deletion below would then throw away the
+/// only copy of anything not yet checkpointed. The guard lives here rather than
+/// only in validation because this is the call that destroys data.
+pub fn swap_in_place(candidate: &Path, live: &Path) -> std::io::Result<()> {
+    if is_same_file(candidate, live) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "this backup is the database you are using right now; \
+             choose a backup file instead",
+        ));
+    }
+    // Copy beside the target, then rename over it, rather than copying straight
+    // onto it. A `fs::copy` interrupted halfway — disk full, power loss — would
+    // leave the live ledger a hybrid of two databases, and startup calls
+    // `rebuild(...).expect(...)`, so a corrupt file makes the app unlaunchable.
+    // `fs::rename` within one directory is atomic, so the live path only ever
+    // names the whole old file or the whole new one.
+    let staged = PathBuf::from(format!("{}.incoming", live.to_string_lossy()));
+    if let Err(e) = fs::copy(candidate, &staged) {
+        let _ = fs::remove_file(&staged);
+        return Err(e);
+    }
+
+    // Sidecars go before the rename, not after: between renaming in a new
+    // database and deleting the old `-wal`, a crash would leave SQLite ready to
+    // replay the OLD write-ahead log onto the NEW file. Discarding the old
+    // sidecars early risks nothing — they belong to the database being replaced,
+    // and the caller's rescue snapshot already captured it complete.
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = PathBuf::from(format!("{}{suffix}", live.to_string_lossy()));
+        if sidecar.exists() {
+            fs::remove_file(&sidecar)?;
+        }
+    }
+    fs::rename(&staged, live)
+}
+
+/// Whether two paths name the same file on disk.
+///
+/// Compared by what the paths resolve to, not by spelling: `canonicalize`
+/// collapses `.`, `..` and symlinks, so `a/sub/../ledger.db` and `a/ledger.db`
+/// compare equal. On Unix the device/inode pair is checked as well, which also
+/// catches two hard links to one file — paths that canonicalize differently but
+/// share storage, where a copy would still clobber the source.
+pub fn is_same_file(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) if ca == cb => return true,
+        // If either path cannot be resolved it does not yet exist, so it cannot
+        // be the live database; fall through to the inode check for hard links.
+        _ => {}
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(ma), Ok(mb)) = (fs::metadata(a), fs::metadata(b)) {
+            return ma.dev() == mb.dev() && ma.ino() == mb.ino();
+        }
+    }
+
+    false
+}
+
+/// Where safety copies live: `<app data>/accounting/rescue`.
+pub fn rescue_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("rescue")
+}
+
+/// Create the rescue directory if absent and return it.
+pub fn ensure_rescue_dir(data_dir: &Path) -> std::io::Result<PathBuf> {
+    let dir = rescue_dir(data_dir);
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+/// Perform a restore against the filesystem: rescue copy, swap, prune, re-mint.
+///
+/// Split out of the `restore_database` command so the ordering can be tested.
+/// Three separate data-loss bugs came from this sequence being wrong — pruning
+/// before the swap deleted the candidate, restoring the live file onto itself
+/// truncated it, and adopting the snapshot's `device_id` made two installs
+/// author under one identity. A Tauri command cannot be called from a test, so
+/// while the ordering lived inline none of that was reachable.
+///
+/// Takes the live connection as `&mut Option<Connection>` — the shape the app
+/// state actually holds — because *when* it becomes `None` is part of what has to
+/// be right. The rescue copy needs it open; the swap needs it closed, since
+/// dropping a connection whose `-wal` has just been deleted lets SQLite write to
+/// the file that was only just restored. Every rejection happens while it is
+/// still `Some`, so a refused restore leaves the session usable.
+///
+/// Returns where the rescue copy was written.
+pub fn perform_restore(
+    live_conn: &mut Option<Connection>,
+    candidate: &Path,
+    live: &Path,
+    data_dir: &Path,
+    device_id: &str,
+    now: i64,
+) -> Result<PathBuf, String> {
+    validate_candidate(candidate).map_err(|e| e.to_string())?;
+
+    // Rejections belong before the connection is dropped: past that point the
+    // app is unusable until a restart, so failing there would brick the session
+    // over a recoverable mistake.
+    if is_same_file(candidate, live) {
+        return Err("this backup is the database you are using right now; \
+                    choose a backup file instead"
+            .into());
+    }
+
+    // Safety copy first: a restore must always be undoable.
+    let rescue = ensure_rescue_dir(data_dir).map_err(|e| e.to_string())?;
+    let rescue_path = rescue.join(snapshot_name(RESCUE_PREFIX, now));
+    {
+        let conn = live_conn.as_ref().ok_or("the ledger is already closed; restart the app")?;
+        snapshot_to(conn, &rescue_path).map_err(|e| e.to_string())?;
+    }
+
+    // Close the live connection before touching the file it points at.
+    *live_conn = None;
+    swap_in_place(candidate, live).map_err(|e| e.to_string())?;
+
+    // Prune AFTER the swap, never before. The file dialog can offer the rescue
+    // copies as a restore source, so `candidate` may be the oldest
+    // `pre-restore-*.db` in this very directory — pruning first would delete it
+    // out from under the swap about to read it.
+    let _ = prune(&rescue, RESCUE_PREFIX, KEEP_AUTO);
+
+    // A snapshot copies the whole file, `app_settings` included, so a backup made
+    // by another install carries that install's `device_id`. Adopting it would
+    // make two installs mint byte-identical event ids for different events.
+    use rusqlite::OptionalExtension;
+    let reopened = Connection::open(live).map_err(|e| e.to_string())?;
+    let restored_id: Option<String> = reopened
+        .query_row("SELECT value FROM app_settings WHERE key = 'device_id'", [], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if restored_id.as_deref() != Some(device_id) {
+        accounting_core::remint_device_id(&reopened).map_err(|e| e.to_string())?;
+    }
+
+    Ok(rescue_path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use accounting_core::{apply_schema, append_event, Hlc};
+
+    /// A unique temp directory, without adding a tempfile dependency.
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("acct-backup-test-{tag}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn timestamp_is_utc_and_sortable() {
+        // 2026-07-30T12:34:56Z = 1785414896 s
+        assert_eq!(timestamp_utc(1_785_414_896_000), "20260730-123456");
+        assert_eq!(timestamp_utc(0), "19700101-000000");
+        assert!(timestamp_utc(1_000) < timestamp_utc(2_000_000_000_000), "must sort chronologically");
+    }
+
+    #[test]
+    fn snapshot_names_carry_their_prefix() {
+        assert_eq!(snapshot_name(AUTO_PREFIX, 0), "ledger-auto-19700101-000000.db");
+        assert_eq!(snapshot_name(MANUAL_PREFIX, 0), "ledger-19700101-000000.db");
+    }
+
+    /// The core promise: a snapshot of a WAL database with committed-but-unmerged
+    /// content is complete. A plain file copy is not.
+    #[test]
+    fn snapshot_of_a_wal_database_is_complete() {
+        let dir = temp_dir("wal");
+        let live = dir.join("ledger.db");
+
+        let conn = Connection::open(&live).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        apply_schema(&conn).unwrap();
+        let mut hlc = Hlc::new("devA");
+        for i in 0..5 {
+            append_event(&conn, &mut hlc, 1000 + i, "devA", "u", "ItemDefined",
+                &serde_json::json!({"itemId": format!("i{i}")})).unwrap();
+        }
+
+        let dest = dir.join("snap.db");
+        let bytes = snapshot_to(&conn, &dest).unwrap();
+        assert!(bytes > 0, "snapshot should not be empty");
+
+        // The snapshot must contain all 5 events even though the WAL was never
+        // checkpointed, and must pass an integrity check on its own.
+        let snap = Connection::open(&dest).unwrap();
+        let n: i64 = snap.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 5, "WAL content must be included in the snapshot");
+        let ok: String = snap.query_row("PRAGMA integrity_check", [], |r| r.get(0)).unwrap();
+        assert_eq!(ok, "ok");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn snapshot_refuses_to_overwrite() {
+        let dir = temp_dir("overwrite");
+        let conn = Connection::open(dir.join("ledger.db")).unwrap();
+        apply_schema(&conn).unwrap();
+        let dest = dir.join("snap.db");
+        snapshot_to(&conn, &dest).unwrap();
+        assert!(snapshot_to(&conn, &dest).is_err(), "VACUUM INTO must not clobber an existing file");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_keeps_the_newest_auto_backups_only() {
+        let dir = temp_dir("prune");
+        for stamp in ["20260101-000000", "20260102-000000", "20260103-000000", "20260104-000000"] {
+            fs::write(dir.join(format!("{AUTO_PREFIX}{stamp}.db")), b"x").unwrap();
+        }
+        let removed = prune(&dir, AUTO_PREFIX, 3).unwrap();
+        assert_eq!(removed.len(), 1);
+        assert!(removed[0].to_string_lossy().contains("20260101"), "oldest must go first");
+        assert!(dir.join(format!("{AUTO_PREFIX}20260104-000000.db")).exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_never_touches_manual_backups() {
+        let dir = temp_dir("prune-manual");
+        for stamp in ["20260101-000000", "20260102-000000", "20260103-000000", "20260104-000000"] {
+            fs::write(dir.join(format!("{MANUAL_PREFIX}{stamp}.db")), b"x").unwrap();
+        }
+        let removed = prune(&dir, AUTO_PREFIX, 3).unwrap();
+        assert!(removed.is_empty(), "manual backups must never be pruned, removed {removed:?}");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 4);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_is_a_no_op_below_the_limit() {
+        let dir = temp_dir("prune-few");
+        fs::write(dir.join(format!("{AUTO_PREFIX}20260101-000000.db")), b"x").unwrap();
+        assert!(prune(&dir, AUTO_PREFIX, 3).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_accepts_a_real_snapshot() {
+        let dir = temp_dir("validate-ok");
+        let conn = Connection::open(dir.join("ledger.db")).unwrap();
+        apply_schema(&conn).unwrap();
+        let mut hlc = Hlc::new("devA");
+        append_event(&conn, &mut hlc, 1000, "devA", "u", "ItemDefined",
+            &serde_json::json!({"itemId": "i1"})).unwrap();
+        let snap = dir.join("snap.db");
+        snapshot_to(&conn, &snap).unwrap();
+
+        validate_candidate(&snap).expect("a real snapshot must validate");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_a_non_database() {
+        let dir = temp_dir("validate-junk");
+        let junk = dir.join("notes.db");
+        fs::write(&junk, b"this is not a sqlite file").unwrap();
+        assert!(validate_candidate(&junk).is_err(), "garbage must be rejected");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_a_database_with_no_events_table() {
+        let dir = temp_dir("validate-noevents");
+        let other = dir.join("other.db");
+        let c = Connection::open(&other).unwrap();
+        c.execute_batch("CREATE TABLE unrelated (x INTEGER)").unwrap();
+        drop(c);
+        assert!(validate_candidate(&other).is_err(), "a foreign database must be rejected");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_an_empty_event_log() {
+        let dir = temp_dir("validate-empty");
+        let empty = dir.join("empty.db");
+        let c = Connection::open(&empty).unwrap();
+        apply_schema(&c).unwrap();
+        drop(c);
+        assert!(validate_candidate(&empty).is_err(), "a snapshot with no events is not a ledger");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_rejects_a_missing_file() {
+        let dir = temp_dir("validate-missing");
+        assert!(validate_candidate(&dir.join("nope.db")).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swap_replaces_the_file_and_removes_stale_wal_sidecars() {
+        let dir = temp_dir("swap");
+        let live = dir.join("ledger.db");
+        let wal = dir.join("ledger.db-wal");
+        let shm = dir.join("ledger.db-shm");
+
+        // A live WAL database with 1 event, plus stale sidecars on disk.
+        let conn = Connection::open(&live).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        apply_schema(&conn).unwrap();
+        let mut hlc = Hlc::new("devA");
+        append_event(&conn, &mut hlc, 1000, "devA", "u", "ItemDefined",
+            &serde_json::json!({"itemId": "old"})).unwrap();
+
+        // A candidate with 2 events.
+        let candidate = dir.join("candidate.db");
+        let c2 = Connection::open(&candidate).unwrap();
+        apply_schema(&c2).unwrap();
+        let mut hlc2 = Hlc::new("devB");
+        for i in 0..2 {
+            append_event(&c2, &mut hlc2, 1000 + i, "devB", "u", "ItemDefined",
+                &serde_json::json!({"itemId": format!("new{i}")})).unwrap();
+        }
+        drop(c2);
+
+        drop(conn); // release the live connection, as restore requires
+
+        // A clean close checkpoints and removes the sidecars, so recreate them:
+        // the case that matters is a crash or kill leaving a WAL behind, which
+        // is exactly when SQLite would try to replay it onto the new file.
+        fs::write(&wal, b"stale wal").unwrap();
+        fs::write(&shm, b"stale shm").unwrap();
+        assert!(wal.exists() && shm.exists(), "guard: sidecars must be present or this test proves nothing");
+
+        swap_in_place(&candidate, &live).unwrap();
+
+        assert!(!wal.exists(), "stale -wal must be deleted or SQLite may replay it onto the new file");
+        assert!(!shm.exists(), "stale -shm must be deleted");
+
+        let restored = Connection::open(&live).unwrap();
+        let n: i64 = restored.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 2, "the live file must now be the candidate");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ---- End-to-end restore tests ----
+    //
+    // These drive the whole sequence, which is where the three data-loss bugs
+    // lived. Each one fails if a step moves.
+
+    /// A live ledger with `n` events and a known `device_id`, left closed.
+    fn live_ledger(path: &Path, device_id: &str, n: usize) -> Connection {
+        let conn = Connection::open(path).unwrap();
+        apply_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES ('device_id', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [device_id],
+        )
+        .unwrap();
+        let mut hlc = Hlc::new(device_id);
+        for i in 0..n {
+            append_event(&conn, &mut hlc, 1000 + i as u64, device_id, "u", "ItemDefined",
+                &serde_json::json!({"itemId": format!("i{i}")})).unwrap();
+        }
+        conn
+    }
+
+    fn count_events(path: &Path) -> i64 {
+        Connection::open(path)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn device_id_of(path: &Path) -> String {
+        Connection::open(path)
+            .unwrap()
+            .query_row("SELECT value FROM app_settings WHERE key = 'device_id'", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// The happy path: the ledger becomes the backup, the old one is rescued, and
+    /// the connection is closed so the app asks for a restart.
+    #[test]
+    fn restore_replaces_the_ledger_and_leaves_an_undo_copy() {
+        let dir = temp_dir("restore-happy");
+        let live = dir.join("ledger.db");
+        let conn = live_ledger(&live, "install-A", 2);
+
+        // A backup of the same install, with more history.
+        let backup = dir.join("backup.db");
+        let older = live_ledger(&dir.join("other.db"), "install-A", 5);
+        snapshot_to(&older, &backup).unwrap();
+        drop(older);
+
+        let mut held = Some(conn);
+        let rescue_path =
+            perform_restore(&mut held, &backup, &live, &dir, "install-A", 1_700_000_000_000)
+                .expect("a valid backup of this install must restore");
+
+        assert!(held.is_none(), "the ledger must be closed so the app asks for a restart");
+        assert_eq!(count_events(&live), 5, "the live ledger must now be the backup");
+        assert_eq!(count_events(&rescue_path), 2, "the rescue copy must hold the pre-restore log");
+        assert_eq!(
+            device_id_of(&live), "install-A",
+            "restoring this install's own backup must keep its identity"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Finding: picking the live database in the file dialog truncated it to zero
+    /// bytes, because `fs::copy(p, p)` returns `Ok(0)` after emptying `p`.
+    #[test]
+    fn restore_refuses_the_live_ledger_and_keeps_the_session_alive() {
+        let dir = temp_dir("restore-self");
+        let live = dir.join("ledger.db");
+        let conn = live_ledger(&live, "install-A", 3);
+
+        let mut held = Some(conn);
+        let err = perform_restore(&mut held, &live, &live, &dir, "install-A", 1_700_000_000_000)
+            .expect_err("restoring the live ledger onto itself must be refused");
+
+        assert!(err.contains("using right now"), "the message must explain why: {err}");
+        assert!(held.is_some(), "a refused restore must not cost the user their session");
+        assert_eq!(count_events(&live), 3, "the ledger must be intact, not truncated");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Finding: the rescue directory was pruned before the swap, so restoring the
+    /// oldest `pre-restore-*.db` deleted the candidate out from under the copy.
+    #[test]
+    fn restore_from_the_oldest_rescue_copy_still_finds_its_source() {
+        let dir = temp_dir("restore-prunes-source");
+        let live = dir.join("ledger.db");
+        let conn = live_ledger(&live, "install-A", 1);
+
+        // Fill the rescue directory past KEEP_AUTO, oldest first, so the file the
+        // user picks is the one a prune would remove.
+        let rescue = ensure_rescue_dir(&dir).unwrap();
+        let source = live_ledger(&dir.join("src.db"), "install-A", 7);
+        let oldest = rescue.join(snapshot_name(RESCUE_PREFIX, 1_600_000_000_000));
+        snapshot_to(&source, &oldest).unwrap();
+        drop(source);
+        for stamp in [1_600_000_001_000, 1_600_000_002_000, 1_600_000_003_000] {
+            fs::copy(&oldest, rescue.join(snapshot_name(RESCUE_PREFIX, stamp))).unwrap();
+        }
+
+        let mut held = Some(conn);
+        perform_restore(&mut held, &oldest, &live, &dir, "install-A", 1_700_000_000_000)
+            .expect("the oldest rescue copy must be usable as a restore source");
+
+        assert_eq!(count_events(&live), 7, "the picked backup must have reached the live ledger");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Finding: a snapshot copies `app_settings` too, so restoring another
+    /// install's backup cloned its `device_id` — two installs then mint
+    /// byte-identical event ids for different events, which cannot be merged.
+    #[test]
+    fn restore_of_another_installs_backup_remints_the_device_id() {
+        let dir = temp_dir("restore-foreign-id");
+        let live = dir.join("ledger.db");
+        let conn = live_ledger(&live, "install-B", 2);
+
+        let foreign = live_ledger(&dir.join("foreign.db"), "install-A", 4);
+        let backup = dir.join("from-A.db");
+        snapshot_to(&foreign, &backup).unwrap();
+        drop(foreign);
+
+        let mut held = Some(conn);
+        perform_restore(&mut held, &backup, &live, &dir, "install-B", 1_700_000_000_000)
+            .expect("another install's backup is a legitimate restore source");
+
+        assert_eq!(count_events(&live), 4, "the restore itself must have happened");
+        let adopted = device_id_of(&live);
+        assert_ne!(adopted, "install-A", "the making install's identity must not be adopted");
+        assert_ne!(adopted, "install-B", "a fresh id is minted; the old one is not resurrected");
+        assert!(!adopted.is_empty(), "a replacement identity must exist");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The swap stages a copy beside the live file, so a failure must leave both
+    /// the ledger and the directory as they were — no half-written ledger, and no
+    /// `.incoming` litter that a later swap would have to reason about.
+    #[test]
+    fn a_failed_swap_leaves_the_live_ledger_untouched() {
+        let dir = temp_dir("swap-fails");
+        let live = dir.join("ledger.db");
+        let conn = Connection::open(&live).unwrap();
+        apply_schema(&conn).unwrap();
+        let mut hlc = Hlc::new("devA");
+        append_event(&conn, &mut hlc, 1000, "devA", "u", "ItemDefined",
+            &serde_json::json!({"itemId": "i1"})).unwrap();
+        drop(conn);
+        let before = fs::read(&live).unwrap();
+
+        let missing = dir.join("not-a-backup.db");
+        assert!(swap_in_place(&missing, &live).is_err(), "a missing candidate must fail the swap");
+
+        assert_eq!(fs::read(&live).unwrap(), before, "the live ledger must be byte-identical");
+        assert!(!dir.join("ledger.db.incoming").exists(), "the staging file must be cleaned up");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The swap must replace the directory entry, not rewrite the live file's
+    /// bytes in place. A reader that already opened the old ledger keeps reading
+    /// the whole old database rather than watching it mutate underneath it — the
+    /// observable difference between `rename` and copying onto the live path, and
+    /// the reason a half-finished swap cannot corrupt the ledger.
+    #[cfg(unix)]
+    #[test]
+    fn swap_replaces_the_directory_entry_rather_than_the_bytes() {
+        use std::io::Read;
+
+        let dir = temp_dir("swap-atomic");
+        let live = dir.join("ledger.db");
+        fs::write(&live, b"old-ledger-contents").unwrap();
+        let candidate = dir.join("snap.db");
+        fs::write(&candidate, b"new").unwrap();
+
+        // Hold the old file open across the swap.
+        let mut held = fs::File::open(&live).unwrap();
+        swap_in_place(&candidate, &live).unwrap();
+
+        let mut through_old_fd = String::new();
+        held.read_to_string(&mut through_old_fd).unwrap();
+        assert_eq!(
+            through_old_fd, "old-ledger-contents",
+            "an already-open reader must still see the complete old file"
+        );
+        assert_eq!(fs::read(&live).unwrap(), b"new", "the path must now name the new file");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swap_refuses_to_restore_a_file_onto_itself() {
+        // The user can pick the live ledger in the restore file dialog: it is a
+        // real database and passes every validate_candidate check. But
+        // fs::copy(p, p) truncates p to zero bytes and returns Ok(0), and the
+        // -wal deletion that follows then discards the only remaining copy of
+        // recent writes. That is total data loss from a plausible misclick.
+        let dir = temp_dir("swap-self");
+        let live = dir.join("ledger.db");
+
+        let conn = Connection::open(&live).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        apply_schema(&conn).unwrap();
+        let mut hlc = Hlc::new("devA");
+        append_event(&conn, &mut hlc, 1000, "devA", "u", "ItemDefined",
+            &serde_json::json!({"itemId": "keep-me"})).unwrap();
+        drop(conn);
+
+        let before = fs::metadata(&live).unwrap().len();
+        assert!(before > 0, "guard: the live file must have content");
+
+        let err = swap_in_place(&live, &live).expect_err("must refuse a self-restore");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+        assert_eq!(
+            fs::metadata(&live).unwrap().len(),
+            before,
+            "the live database must not be touched"
+        );
+        let reopened = Connection::open(&live).unwrap();
+        let n: i64 = reopened.query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1, "the event must survive");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn swap_detects_self_restore_through_a_different_path_spelling() {
+        // Same file reached as ".../sub/../ledger.db". A string comparison would
+        // miss this; identity must be decided by what the paths resolve to.
+        let dir = temp_dir("swap-self-alias");
+        let live = dir.join("ledger.db");
+        fs::create_dir_all(dir.join("sub")).unwrap();
+
+        let conn = Connection::open(&live).unwrap();
+        apply_schema(&conn).unwrap();
+        let mut hlc = Hlc::new("devA");
+        append_event(&conn, &mut hlc, 1000, "devA", "u", "ItemDefined",
+            &serde_json::json!({"itemId": "keep-me"})).unwrap();
+        drop(conn);
+
+        let before = fs::metadata(&live).unwrap().len();
+        let aliased = dir.join("sub").join("..").join("ledger.db");
+
+        let err = swap_in_place(&aliased, &live).expect_err("must refuse an aliased self-restore");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(fs::metadata(&live).unwrap().len(), before, "must not be truncated");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Restore may use a rescue copy as its own source. `restore_database` must
+    /// therefore run `swap_in_place` before pruning the rescue directory: prune
+    /// (keep=3) removes the oldest matching `.db`, which is exactly that source.
+    /// This pins the hazard at the primitive level — prune-before-swap loses the
+    /// candidate; swap-before-prune preserves its content in `live`.
+    #[test]
+    fn pruning_before_the_swap_would_delete_the_restore_source() {
+        let dir = temp_dir("restore-from-rescue");
+        let rescue = dir.join("rescue");
+        fs::create_dir_all(&rescue).unwrap();
+
+        // Three rescue copies; the oldest carries a marker so we can prove which
+        // file's content lands in `live`.
+        for (i, stamp) in ["20260101-000000", "20260102-000000", "20260103-000000"]
+            .iter()
+            .enumerate()
+        {
+            let p = rescue.join(format!("{RESCUE_PREFIX}{stamp}.db"));
+            let c = Connection::open(&p).unwrap();
+            apply_schema(&c).unwrap();
+            let mut hlc = Hlc::new("devA");
+            append_event(&c, &mut hlc, 1000 + i as u64, "devA", "u", "ItemDefined",
+                &serde_json::json!({"itemId": stamp})).unwrap();
+        }
+
+        // The user restores from the OLDEST rescue copy.
+        let candidate = rescue.join(format!("{RESCUE_PREFIX}20260101-000000.db"));
+        let live = dir.join("ledger.db");
+        let c = Connection::open(&live).unwrap();
+        apply_schema(&c).unwrap();
+        drop(c);
+
+        // A fourth rescue copy is written (the pre-restore snapshot of `live`),
+        // so the directory now holds four — one over the keep limit.
+        let fresh = rescue.join(format!("{RESCUE_PREFIX}20260104-000000.db"));
+        fs::copy(&live, &fresh).unwrap();
+
+        // Correct order: swap first, then prune.
+        swap_in_place(&candidate, &live).unwrap();
+        prune(&rescue, RESCUE_PREFIX, KEEP_AUTO).unwrap();
+
+        // `live` must carry the oldest rescue copy's marker, even though that
+        // copy was the prune target.
+        let restored = Connection::open(&live).unwrap();
+        let marker: String = restored
+            .query_row("SELECT json_extract(payload, '$.itemId') FROM events LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(marker, "20260101-000000", "the chosen source's content must survive the swap");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rescue_dir_is_created_on_demand() {
+        let dir = temp_dir("rescue");
+        let rescue = rescue_dir(&dir);
+        assert!(!rescue.exists(), "should not exist yet");
+        let made = ensure_rescue_dir(&dir).unwrap();
+        assert!(made.exists() && made.is_dir());
+        assert_eq!(made, rescue);
+        // Idempotent.
+        ensure_rescue_dir(&dir).unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
