@@ -642,13 +642,22 @@ fn sale_return(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
         rusqlite::params![return_id, revenue_reversed, cost_restored],
     )?;
 
-    let customer: Option<String> = tx.query_row(
-        "SELECT customer_id FROM sales WHERE id = ?1", [original_id], |r| r.get(0))?;
+    // A cash sale also stores its `customer_id` — the walk-in party for an
+    // anonymous counter sale, a named one when the customer is known but paid on
+    // the spot. So the presence of a customer says nothing about how the refund
+    // must be settled; only the terms do. Gating on the customer refunded every
+    // cash return to Accounts Receivable and credited the customer an
+    // unallocated credit they were never owed, since a cash sale has
+    // `outstanding_minor = 0` and the whole amount fell through as excess.
+    let credit_customer: Option<String> = tx.query_row(
+        "SELECT CASE WHEN terms = 'credit' THEN customer_id END FROM sales WHERE id = ?1",
+        [original_id], |r| r.get(0))?;
 
     let sales_acct = account_id_by_role(tx, "sales")?;
     let inventory = account_id_by_role(tx, "inventory")?;
     let cogs = account_id_by_role(tx, "cogs")?;
-    let refund_acct = if customer.is_some() {
+    // Credit sale: cancel what they owe. Cash sale: money goes back out the till.
+    let refund_acct = if credit_customer.is_some() {
         account_id_by_role(tx, "accounts_receivable")?
     } else {
         account_id_by_role(tx, "bank")?
@@ -658,7 +667,7 @@ fn sale_return(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
     post_line(tx, &ev.id, return_id, 2, &inventory, cost_restored, 0, date, None)?;
     post_line(tx, &ev.id, return_id, 3, &cogs, 0, cost_restored, date, None)?;
 
-    if let Some(c) = customer {
+    if let Some(c) = credit_customer {
         let outstanding: i64 = tx.query_row(
             "SELECT outstanding_minor FROM sales WHERE id = ?1", [original_id], |r| r.get(0))?;
         let reduce = revenue_reversed.min(outstanding.max(0));
@@ -702,11 +711,14 @@ fn purchase_return(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
         rusqlite::params![return_id, cost_restored],
     )?;
 
-    let supplier: Option<String> = tx.query_row(
-        "SELECT supplier_id FROM purchases WHERE id = ?1", [original_id], |r| r.get(0))?;
+    // The mirror of the cash-sale case in `sale_return`: a cash purchase stores
+    // its `supplier_id` too, so only the terms decide how the refund settles.
+    let credit_supplier: Option<String> = tx.query_row(
+        "SELECT CASE WHEN terms = 'credit' THEN supplier_id END FROM purchases WHERE id = ?1",
+        [original_id], |r| r.get(0))?;
 
     let inventory = account_id_by_role(tx, "inventory")?;
-    let refund_acct = if supplier.is_some() {
+    let refund_acct = if credit_supplier.is_some() {
         account_id_by_role(tx, "accounts_payable")?
     } else {
         account_id_by_role(tx, "bank")?
@@ -714,7 +726,7 @@ fn purchase_return(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
     post_line(tx, &ev.id, return_id, 0, &refund_acct, cost_restored, 0, date, None)?;
     post_line(tx, &ev.id, return_id, 1, &inventory, 0, cost_restored, date, None)?;
 
-    if let Some(s) = supplier {
+    if let Some(s) = credit_supplier {
         let outstanding: i64 = tx.query_row(
             "SELECT outstanding_minor FROM purchases WHERE id = ?1", [original_id], |r| r.get(0))?;
         let reduce = cost_restored.min(outstanding.max(0));
