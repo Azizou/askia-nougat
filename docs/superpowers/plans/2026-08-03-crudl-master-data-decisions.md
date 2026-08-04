@@ -107,9 +107,33 @@ Delete. Notably `handle_account_updated` and `handle_user_updated` exist in the 
 unreachable from the frontend — the same gap this work closed for items and parties. Left out per
 the agreed scope, recorded here so it is a known deferral rather than a rediscovery.
 
+## D10 — The seeded parties are cash-only, enforced in the core
+
+`check_seeded_party_cash_only` refuses `terms = "credit"` for `party_walkin` and
+`party_anon_supplier` in `handle_sale_recorded`, `handle_purchase_recorded`, and the credit branch
+of `handle_expense_recorded`. The UI additionally clears its auto-selection when the user switches
+to credit, so the error is normally unreachable.
+
+**Why:** found while verifying this branch, not predicted by the plan. The auto-select effect
+predates the work, but changing the default terms to cash is what made the bad path easy: the form
+now opens with the seeded party already selected, and switching to credit left it selected. A probe
+confirmed the core accepted it — a credit sale to the walk-in customer booked
+`receivable_minor = 3000` against a party that by construction identifies nobody, so the receivable
+is uncollectable and permanently inflates receivables. The mirror case booked an unpayable payable
+to "Cash Supplier".
+
+The guard lives in the core rather than only in the form because `import_event_log` can carry a
+command from another device, and because three separate call sites shared the same shape — the
+expense case was found by checking the mirror of the two obvious ones.
+
 ## Outstanding
 
-The manual end-to-end check in a running app did not run: record a credit sale, pay it off with an
-allocation, confirm outstanding reaches zero. The automated gates (213 Rust tests, clippy with
-`-D warnings`, `tsc --noEmit`, `vite build`) are green, and the allocation path is verified at the
-Rust level, but the React allocation table itself has not been exercised against a live backend.
+The allocation flow is verified at the Rust level against a copy of a real 242-event ledger, in both
+directions: a credit sale settles to zero outstanding with the party receivable returning to zero,
+and the mirror credit purchase does the same via `purchaseId`. Over-allocating a settled invoice is
+refused. What has **not** run is the React allocation table itself in the Tauri GUI — the UI calls
+`invoke` directly with no browser fallback, so no headless path exercises it. The `invoke` payloads
+were instead checked field by field against the Rust `Deserialize` structs.
+
+Gates at the close of this work: 216 Rust tests, `cargo clippy --all-targets -- -D warnings`,
+`tsc --noEmit`, and `vite build` all clean.
