@@ -3,7 +3,7 @@ mod commands;
 mod error;
 mod state;
 
-use accounting_core::{apply_schema, ensure_device_id, ensure_walkin_party, rebuild, Hlc, rehydrate_from_log, run_genesis};
+use accounting_core::{apply_schema, ensure_anon_supplier, ensure_device_id, ensure_walkin_party, rebuild, Hlc, rehydrate_from_log, run_genesis};
 use state::AppState;
 use std::fs;
 use std::path::PathBuf;
@@ -41,6 +41,7 @@ fn init_state(app_data_dir: PathBuf) -> AppState {
     // fresh installs and installs whose genesis predates this party). Must run
     // before rebuild so the event is projected this startup.
     ensure_walkin_party(&conn, &mut hlc, now_ms(), &device_id).expect("seed walk-in party");
+    ensure_anon_supplier(&conn, &mut hlc, now_ms(), &device_id).expect("seed anonymous supplier");
 
     // Always rebuild projections on startup — ensures genesis events are projected
     // and recovers from any interrupted prior session.

@@ -100,6 +100,35 @@ pub fn ensure_walkin_party(
     Ok(())
 }
 
+/// Idempotently ensure the anonymous cash supplier exists.
+///
+/// The mirror of [`ensure_walkin_party`], and safe on every startup for the
+/// same reason: it consults the immutable event log rather than the `parties`
+/// projection, which is empty until `rebuild()` runs. Covers installs whose
+/// genesis predates this party.
+pub fn ensure_anon_supplier(
+    conn: &Connection,
+    hlc: &mut Hlc,
+    physical_now: u64,
+    device_id: &str,
+) -> rusqlite::Result<()> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events WHERE type = 'PartyCreated' \
+         AND json_extract(payload, '$.partyId') = ?1",
+        [ANON_SUPPLIER_PARTY_ID],
+        |r| r.get(0),
+    )?;
+    if exists > 0 {
+        return Ok(());
+    }
+    append_event(
+        conn, hlc, physical_now, device_id, SYSTEM_USER_ID,
+        "PartyCreated",
+        &json!({ "partyId": ANON_SUPPLIER_PARTY_ID, "name": "Cash Supplier", "kind": "supplier", "active": true }),
+    )?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +203,51 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1, "walk-in party must be seeded exactly once");
+    }
+
+    #[test]
+    fn ensure_anon_supplier_seeds_once_and_is_idempotent() {
+        let conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("deviceA");
+        run_genesis(&conn, &mut hlc, 1000, "deviceA", "owner-1", "Jane").unwrap();
+
+        ensure_anon_supplier(&conn, &mut hlc, 2000, "deviceA").unwrap();
+        ensure_anon_supplier(&conn, &mut hlc, 3000, "deviceA").unwrap();
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE type='PartyCreated' \
+                 AND json_extract(payload, '$.partyId') = ?1",
+                [ANON_SUPPLIER_PARTY_ID],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "the anonymous supplier must be seeded exactly once");
+    }
+
+    #[test]
+    fn ensure_anon_supplier_projects_a_supplier_party() {
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("deviceA");
+        run_genesis(&conn, &mut hlc, 1000, "deviceA", "owner-1", "Jane").unwrap();
+        ensure_anon_supplier(&conn, &mut hlc, 2000, "deviceA").unwrap();
+        crate::projectors::rebuild(&mut conn).unwrap();
+        let (kind, active): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT kind, active FROM parties WHERE id = ?1",
+                [ANON_SUPPLIER_PARTY_ID],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        // `handle_purchase_recorded` calls ensure_party(.., &["supplier"]),
+        // so the kind must be exactly this.
+        assert_eq!(kind, "supplier");
+        assert_eq!(active, Some(1), "it must be visible in supplier dropdowns");
+    }
+
+    #[test]
+    fn the_two_seeded_parties_are_distinct() {
+        assert_ne!(WALKIN_PARTY_ID, ANON_SUPPLIER_PARTY_ID);
     }
 
     #[test]
