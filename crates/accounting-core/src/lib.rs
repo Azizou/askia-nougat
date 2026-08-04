@@ -8,6 +8,7 @@ pub mod reconciliation;
 pub mod queries;
 pub mod settings;
 pub mod archive;
+mod refs;
 #[cfg(test)]
 mod test_support;
 
