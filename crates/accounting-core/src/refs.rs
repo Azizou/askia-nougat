@@ -59,33 +59,60 @@ mod tests {
 
     #[test]
     fn every_referencing_column_is_listed() {
-        // Guards against a new table quietly gaining a column that points at
-        // items or parties without the delete guard learning to check it.
+        // Derived from the live schema, not from a second hand-written list. The
+        // previous version of this test enumerated the same nine columns the
+        // constants already contain and asserted each was present, which is
+        // "my list is a subset of my list" — a new table with an `item_id`
+        // pointing at master data passed it without anyone touching either list,
+        // which is precisely the drift it was supposed to catch.
+        //
+        // Ground truth is the naming convention: a column named `item_id`,
+        // `party_id`, `customer_id` or `supplier_id` points at master data. That
+        // is stronger than reading `PRAGMA foreign_key_list`, because only five of
+        // the nine columns declare a real FK — `sales.customer_id` and
+        // `payments.party_id` among those that do not — so an FK-derived check
+        // would miss the majority of them.
         let conn = open_in_memory_with_schema().unwrap();
-        let expect_listed = |refs: &[(&str, &str)], table: &str, column: &str| {
-            assert!(
-                refs.iter().any(|(t, c)| *t == table && *c == column),
-                "{table}.{column} references master data but is missing from the reference table"
-            );
+        let tables: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+                .unwrap();
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            rows.collect::<rusqlite::Result<_>>().unwrap()
         };
-        for (table, column) in [
-            ("inventory_lots", "item_id"),
-            ("sale_lines", "item_id"),
-            ("purchase_lines", "item_id"),
-            ("return_lines", "item_id"),
-        ] {
-            expect_listed(ITEM_REFS, table, column);
+
+        let mut unlisted = Vec::new();
+        for table in &tables {
+            // `items` and `parties` are the targets, not referrers; the events log
+            // is the source of truth and is never subject to the delete guard.
+            if matches!(table.as_str(), "items" | "parties" | "events") {
+                continue;
+            }
+            let columns: Vec<String> = {
+                let mut stmt = conn
+                    .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                    .unwrap();
+                let rows = stmt.query_map([], |r| r.get::<_, String>(0)).unwrap();
+                rows.collect::<rusqlite::Result<_>>().unwrap()
+            };
+            for column in columns {
+                let expected: &[(&str, &str)] = match column.as_str() {
+                    "item_id" => ITEM_REFS,
+                    "party_id" | "customer_id" | "supplier_id" => PARTY_REFS,
+                    _ => continue,
+                };
+                if !expected.iter().any(|(t, c)| t == table && *c == column) {
+                    unlisted.push(format!("{table}.{column}"));
+                }
+            }
         }
-        for (table, column) in [
-            ("inventory_lots", "supplier_id"),
-            ("sales", "customer_id"),
-            ("purchases", "supplier_id"),
-            ("payments", "party_id"),
-            ("party_balances", "party_id"),
-        ] {
-            expect_listed(PARTY_REFS, table, column);
-        }
-        // And every listed table/column must actually exist, so a rename
+        assert!(
+            unlisted.is_empty(),
+            "these columns reference master data but are missing from ITEM_REFS/PARTY_REFS, \
+             so the delete guard will not count them and a delete could orphan them: {unlisted:?}"
+        );
+
+        // The converse: every listed table/column must actually exist, so a rename
         // cannot leave the guard silently counting nothing.
         for refs in [ITEM_REFS, PARTY_REFS] {
             for (table, column) in refs {
@@ -101,5 +128,34 @@ mod tests {
                 assert_eq!(n, 1, "{table}.{column} does not exist");
             }
         }
+
+        // And the two lists must be exhaustive in the other direction too: the
+        // discovery loop above found every convention-named column, so the counts
+        // must match, or a listed entry names a column the convention does not
+        // recognise and the discovery loop is blind to part of the schema.
+        let discovered = tables
+            .iter()
+            .filter(|t| !matches!(t.as_str(), "items" | "parties" | "events"))
+            .flat_map(|table| {
+                let mut stmt = conn
+                    .prepare(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                    .unwrap();
+                let cols: Vec<String> = stmt
+                    .query_map([], |r| r.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                cols.into_iter()
+                    .filter(|c| {
+                        matches!(c.as_str(), "item_id" | "party_id" | "customer_id" | "supplier_id")
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .count();
+        assert_eq!(
+            discovered,
+            ITEM_REFS.len() + PARTY_REFS.len(),
+            "the reference lists and the schema disagree on how many columns point at master data"
+        );
     }
 }
