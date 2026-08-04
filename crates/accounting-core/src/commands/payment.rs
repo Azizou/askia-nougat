@@ -274,9 +274,17 @@ mod tests {
     ///
     /// Two things must hold for such a log. It must still replay, or the guard would
     /// brick startup for exactly the users it was meant to protect. And the phantom
-    /// balance must remain clearable, which is why `handle_payment_allocated` is
-    /// deliberately left unguarded: allocating the stray prepayment against the stray
-    /// invoice is the remediation, not a repeat of the mistake.
+    /// balance must remain clearable *at the core level*, which is why
+    /// `handle_payment_allocated` is deliberately left unguarded: allocating the stray
+    /// prepayment against the stray invoice is the remediation, not a repeat of the
+    /// mistake.
+    ///
+    /// Clearable at the core level is the whole claim, and the distinction matters.
+    /// `handle_payment_allocated` is not registered in `generate_handler!`, so there is
+    /// no UI route to it and this remediation is not a capability a user has today —
+    /// such a user is already stranded by the missing command, not by any guard. What
+    /// this test pins is that adding the guard would not be the thing standing in the
+    /// way once an allocation command is exposed. See D11.
     #[test]
     fn an_imported_legacy_seeded_party_balance_replays_and_stays_clearable() {
         let (mut conn, mut hlc) = fixture();

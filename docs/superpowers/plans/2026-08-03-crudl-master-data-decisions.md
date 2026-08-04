@@ -181,11 +181,19 @@ expense case was found by checking the mirror of the two obvious ones.
 `check_seeded_party_takes_no_payment` refuses `handle_payment_received` and
 `handle_payment_made` for both seeded ids, and the payments dropdown filters them out.
 
-**Why:** D10 closed credit trade, which means a seeded party can never hold an invoice.
+**Why:** the argument is *not* "cash trade needs no payment", which is a claim about business
+practice and would be arguable. It is structural: D10 closed credit trade, which means a seeded party
+can never hold an invoice.
 A payment therefore has nothing to settle, so it could only land as an *unallocated
 prepayment* — `unallocated_cr_minor` credited to a party that identifies nobody, and which
 no future invoice can ever draw down, because no future invoice can exist. That is the same
 defect as D10 one route further along: a permanent balance owed to no one.
+
+The strongest counter-case is a customer deposit — money taken up front against goods collected
+later. It does not survive: the business has to know whose deposit it is to hand the goods over, so
+recording it against "Walk-in Customer" makes it unrecoverable in precisely the way D10 describes.
+The correct workflow is to create the party. A cash refund is the other candidate, and it is a
+return rather than a payment — that case lands in D13, not here.
 
 Found by asking what else can move a party balance after fixing the terms paths. The answer
 was payments, and unlike the sales and purchases forms the payments form has no
@@ -200,10 +208,37 @@ design, not a hole. A log written by a device on an older build can therefore ca
 credit sale to the walk-in customer and a prepayment from it.
 
 In exactly that scenario, allocating the imported prepayment against the imported invoice is
-the *remediation*: it draws the phantom credit down and reduces the bad balance to zero.
-Guarding it would strand a user with legacy data, holding a balance they cannot clear through
-the UI. So the guard belongs on the two commands that create the bad state and not on the one
-that resolves it. `check_credit_overdraw` still bounds it to the credit actually held.
+the *remediation*: it draws the phantom credit down and reduces the bad balance to zero. So the
+guard belongs on the two commands that create the bad state and not on the one that resolves it.
+`check_credit_overdraw` still bounds it to the credit actually held.
+
+**Corrected — the stranding argument I first gave for this was wrong, and the difference is
+load-bearing.** I wrote that guarding `handle_payment_allocated` "would strand a user with legacy
+data, holding a balance they cannot clear through the UI." There is no UI route to
+`handle_payment_allocated`: it is absent from `generate_handler!`, and its only non-test reference
+outside the core is the `pub use` re-export. `record_payment` does accept an `allocations` array,
+but those ride inline in the `PaymentReceived`/`PaymentMade` payload — a different event type — so
+that path never reaches it either. A user importing such a log is therefore *already* stranded, by
+the missing command rather than by any guard, and `Payments.tsx` cannot even offer the seeded party
+because D11's own dropdown filter removes it.
+
+The honest version: the guard would be harmless today, because the function is unreachable either
+way. It stays off so the remediation is available *if and when* an allocation command is exposed.
+Same conclusion, different and much narrower reason.
+
+This also downgrades what the sabotage proved. Adding the guard does fail
+`an_imported_legacy_seeded_party_balance_replays_and_stays_clearable`, but that shows the guard
+would block the *core function* — not that it would block a user remediation, which is what the
+doc claimed. Structurally the same error as the D4 sabotage above: the test went red for a narrower
+reason than the prose asserted. Twice now, so the pattern is the lesson, not the instance — a
+sabotage licenses exactly the claim the assertion makes and no more, and "the test failed" is not
+the same as "the failure means what I said it means."
+
+**Which side of the line this branch is on:** making the remediation real needs a Tauri command for
+`handle_payment_allocated`, a UI entry point, and an exception in the payments dropdown filter for a
+seeded party holding a nonzero balance. That is new scope and is *not* taken here. Recorded as a
+deferral, alongside the returns commands in D13 — the two unreachable-by-omission facts belong in
+the same place, because both are load-bearing and neither is obvious from the code.
 
 Checked against the user's real 242-event ledger before adding the guard: it contains no
 credit sale to the walk-in customer, no credit purchase from the anonymous supplier, no
@@ -238,6 +273,20 @@ without guards. That omission is load-bearing for the defect's blast radius, whi
 is recorded here rather than relied on silently — registering a return command later re-opens the
 path, and the fix has to already be in place when that happens. This amends D9, which lists returns
 as deferred but does not say that the deferral is what kept a real projector bug out of reach.
+
+`handle_payment_allocated` is unreachable for the identical reason; see the correction in D11. Two
+distinct real defects have now been found sitting behind a missing `generate_handler!` entry, so the
+omission is not a safety property to lean on — it is an accident that happens to be holding, and the
+next command registered is what collects the bill.
+
+**This also closes the seeded-party route the returns projectors opened, without needing a guard.**
+A cash sale to the walk-in party, returned, used to land `unallocated_cr_minor = 3000` on it — the
+exact state D10 and D11 exist to prevent, reached with no credit transaction anywhere. It was
+`customer.is_some()` gating that did it, and gating on `terms` removes it: a cash return now refunds
+the till and touches no party balance at all. `purchase_return` likewise. So the fifth and sixth call
+sites of the D10/D11 shape are closed structurally rather than by a sixth guard, which is why no
+`check_seeded_party_*` call appears in either projector — and per D4 a projector is the wrong place
+for one regardless.
 
 ## D14 — The walk-in seed states `active` explicitly
 
