@@ -80,10 +80,11 @@ CREATE INDEX IF NOT EXISTS lots_item_open ON inventory_lots (item_id, acquired_a
 
 -- §5.5 parties
 CREATE TABLE IF NOT EXISTS parties (
-  id   TEXT PRIMARY KEY,
-  doc  BLOB NOT NULL,
-  name TEXT GENERATED ALWAYS AS (doc ->> 'name') VIRTUAL,
-  kind TEXT GENERATED ALWAYS AS (doc ->> 'kind') VIRTUAL
+  id     TEXT PRIMARY KEY,
+  doc    BLOB NOT NULL,
+  name   TEXT GENERATED ALWAYS AS (doc ->> 'name') VIRTUAL,
+  kind   TEXT GENERATED ALWAYS AS (doc ->> 'kind') VIRTUAL,
+  active INTEGER GENERATED ALWAYS AS (doc ->> 'active') VIRTUAL
 );
 CREATE INDEX IF NOT EXISTS parties_kind ON parties (kind);
 

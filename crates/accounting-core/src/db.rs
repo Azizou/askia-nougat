@@ -16,9 +16,40 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
 
 const SCHEMA_SQL: &str = include_str!("schema.sql");
 
-/// Apply the schema. Idempotent (all statements use IF NOT EXISTS).
+/// Bring an already-created schema up to date.
+///
+/// `apply_schema` alone cannot do this: every statement in `schema.sql` is
+/// `CREATE ... IF NOT EXISTS`, which does nothing to a table that already
+/// exists, and `rebuild` clears projections with `DELETE FROM` rather than
+/// dropping them. So a column added to `schema.sql` reaches fresh installs
+/// only — an upgraded install would keep the old table shape and fail every
+/// query that names the new column.
+fn migrate_schema(conn: &Connection) -> rusqlite::Result<()> {
+    if !has_column(conn, "parties", "active")? {
+        conn.execute_batch(
+            "ALTER TABLE parties
+               ADD COLUMN active INTEGER GENERATED ALWAYS AS (doc ->> 'active') VIRTUAL",
+        )?;
+    }
+    Ok(())
+}
+
+/// Whether `table` has a column named `column`, counting generated columns —
+/// hence `table_xinfo` rather than `table_info`.
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let n: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM pragma_table_xinfo('{table}') WHERE name = ?1"),
+        [column],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// Apply the schema, then migrate anything an older install already created.
+/// Idempotent: the DDL is all `IF NOT EXISTS` and each migration checks first.
 pub fn apply_schema(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch(SCHEMA_SQL)
+    conn.execute_batch(SCHEMA_SQL)?;
+    migrate_schema(conn)
 }
 
 /// Open an in-memory database with PRAGMAs applied AND the schema created.
@@ -94,5 +125,57 @@ mod tests {
                 .unwrap();
             assert_eq!(has_reversed, 1, "{tbl}.reversed column should exist");
         }
+    }
+
+    #[test]
+    fn migration_adds_active_to_a_pre_existing_parties_table() {
+        // Reproduces a v0.1.2 install: `parties` already exists without `active`.
+        // `CREATE TABLE IF NOT EXISTS` is a no-op against it and `rebuild` only
+        // DELETEs rows, so without an explicit migration the column never appears
+        // and every query naming it fails with "no such column".
+        let conn = open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE parties (
+               id   TEXT PRIMARY KEY,
+               doc  BLOB NOT NULL,
+               name TEXT GENERATED ALWAYS AS (doc ->> 'name') VIRTUAL,
+               kind TEXT GENERATED ALWAYS AS (doc ->> 'kind') VIRTUAL
+             );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO parties (id, doc) VALUES ('p_old', jsonb('{\"name\":\"Acme\",\"kind\":\"supplier\"}'))",
+            [],
+        )
+        .unwrap();
+
+        apply_schema(&conn).expect("apply schema over an existing table");
+
+        let active: Option<i64> = conn
+            .query_row("SELECT active FROM parties WHERE id = 'p_old'", [], |r| {
+                r.get(0)
+            })
+            .expect("the active column must exist after migration");
+        assert_eq!(active, None, "a row predating the field reads NULL, not 0");
+
+        let visible: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM parties WHERE COALESCE(active, 1) = 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            visible, 1,
+            "a NULL active must be treated as active, not hidden"
+        );
+    }
+
+    #[test]
+    fn migration_is_idempotent() {
+        let conn = open_in_memory().unwrap();
+        apply_schema(&conn).unwrap();
+        apply_schema(&conn).expect("second apply must not error");
+        apply_schema(&conn).expect("third apply must not error");
     }
 }
