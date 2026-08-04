@@ -10,6 +10,10 @@ pub const SYSTEM_USER_ID: &str = "system";
 /// walk-in buyers.
 pub const WALKIN_PARTY_ID: &str = "party_walkin";
 
+/// The shared, always-present supplier used to record cash purchases from an
+/// unrecorded seller — the buy-side counterpart of [`WALKIN_PARTY_ID`].
+pub const ANON_SUPPLIER_PARTY_ID: &str = "party_anon_supplier";
+
 /// Seeded chart of accounts: (system_role, display name, type, normal side).
 const SEEDED_ACCOUNTS: &[(&str, &str, &str, &str)] = &[
     ("cash",                "Cash",                     "asset",     "debit"),

@@ -11,7 +11,8 @@ pub fn categories_of(event_type: &str) -> Vec<EventCategory> {
     use EventCategory::*;
     match event_type {
         "UserRegistered" | "AccountOpened" | "ItemDefined" | "PartyCreated"
-        | "UserUpdated" | "AccountUpdated" | "ItemUpdated" | "PartyUpdated" => vec![],
+        | "UserUpdated" | "AccountUpdated" | "ItemUpdated" | "PartyUpdated"
+        | "ItemDeleted" | "PartyDeleted" => vec![],
 
         "PurchaseRecorded" => vec![LotCreating, Transactional],
         "InventoryFound"   => vec![LotCreating, Transactional],
@@ -69,5 +70,16 @@ mod tests {
         assert!(!categories_of("ItemDefined").contains(&EventCategory::Transactional));
         assert!(!categories_of("OpeningBalancesRecorded").contains(&EventCategory::Transactional));
         assert!(categories_of("PaymentAllocated").contains(&EventCategory::Transactional));
+    }
+
+    #[test]
+    fn master_data_deletes_are_not_transactional() {
+        // Non-transactional means not a legal reversal target: undoing a hard
+        // delete means recreating the record, and archive is the reversible
+        // operation. See check_reversal_legal_target.
+        for t in ["ItemDeleted", "PartyDeleted"] {
+            assert!(categories_of(t).is_empty(), "{t}");
+            assert!(!is_transactional(t), "{t}");
+        }
     }
 }

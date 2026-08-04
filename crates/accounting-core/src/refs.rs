@@ -1,9 +1,5 @@
 use rusqlite::Connection;
 
-// Consumed by the delete guard in commands::setup and the delete projector in
-// projectors — both land in the next commit. Until then the lib build sees no
-// caller, though the tests below exercise every path.
-#[allow(dead_code)]
 /// Every column in the read model that points at `items.id`.
 pub(crate) const ITEM_REFS: &[(&str, &str)] = &[
     ("inventory_lots", "item_id"),
@@ -12,7 +8,6 @@ pub(crate) const ITEM_REFS: &[(&str, &str)] = &[
     ("return_lines", "item_id"),
 ];
 
-#[allow(dead_code)]
 /// Every column in the read model that points at `parties.id`.
 pub(crate) const PARTY_REFS: &[(&str, &str)] = &[
     ("inventory_lots", "supplier_id"),
@@ -29,7 +24,6 @@ pub(crate) const PARTY_REFS: &[(&str, &str)] = &[
 /// same condition at replay time. Were the two to disagree, the projector
 /// could attempt a DELETE that a foreign key rejects — and startup calls
 /// `rebuild(...).expect(...)`, so that makes the app unlaunchable.
-#[allow(dead_code)]
 pub(crate) fn count_references(
     conn: &Connection,
     refs: &[(&str, &str)],
