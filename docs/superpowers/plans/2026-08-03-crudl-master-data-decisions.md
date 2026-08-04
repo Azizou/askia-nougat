@@ -41,9 +41,9 @@ app — the worst class of bug here, because it looks like data loss to the user
 
 ## D4 — Guards reject strictly; projectors degrade and never fail
 
-`ensure_unreferenced` refuses an interactive delete of anything referenced. The projector's
-`delete_master` re-counts references at replay time and **archives instead of deleting** when it
-finds any, and `set_active`/`patch_doc` treat a missing row as a no-op rather than an error.
+`ensure_unreferenced` refuses an interactive delete of anything referenced. The projector never
+fails: `set_active`/`patch_doc` treat a missing row as a no-op rather than an error, and
+`delete_master` does not delete at all (see D12).
 
 **Why (F3):** `PRAGMA foreign_keys = ON` and `init_state` calls
 `rebuild(&mut conn).expect("rebuild projections")`. An event that cannot be projected is therefore
@@ -53,12 +53,62 @@ order, so device A's delete of an item it never used can legitimately sort *befo
 sale of that item. Command-time validation and replay see different worlds; only the guard has a
 user to reject to.
 
-Both halves consult the same `refs.rs` helpers so they cannot drift — a projector laxer than its
-guard is precisely the bricking case.
+**Corrected — the original version of this decision was wrong, and D12 records the fix.** It said
+`delete_master` "re-counts references at replay time and archives instead of deleting when it finds
+any", and argued that "both halves consult the same `refs.rs` helpers so they cannot drift". Sharing
+the helpers does settle *what counts as a reference*, but the drift is on the *when* axis, and no
+amount of shared code addresses that: a reference count taken mid-replay is not a fact about the
+ledger, it is an artifact of position in the stream. In the very ordering this decision names, the
+count is legitimately zero, the DELETE succeeds, and the foreign key fails later inside the
+*referencing* INSERT — which `delete_master` does not control.
 
-Proven by sabotage: replacing `delete_master`'s body with an unconditional `DELETE` makes
-`a_delete_ordered_before_the_sale_that_uses_the_item_archives_instead_of_failing` fail with
-`FOREIGN KEY constraint failed` (SQLite extended code 787). The test earns its place.
+The sabotage proof went red for the wrong reason. The test it named,
+`a_delete_ordered_before_the_sale_that_uses_the_item_archives_instead_of_failing`, in fact
+appended the sale *first* and the delete second — the opposite ordering from its name. It was
+therefore exercising the case the projector genuinely did handle, and certified a claim it never
+tested. It is now named
+`a_delete_arriving_after_the_purchase_that_uses_the_item_keeps_the_row`, and two new tests cover the
+ordering the old name claimed.
+
+The lesson worth keeping: a sabotage proof only licenses the claim if the test that goes red is the
+test that exercises the claim. Read the test body, not the test name.
+
+## D12 — `delete_master` marks; a separate compaction pass removes
+
+`delete_master` sets `active = false` plus a `deleted` flag inside the row's JSON doc and never
+removes anything, so it is total in either ordering. `compact_deleted_master` then removes every
+marked row that nothing references. A row that turns out to be referenced stays as an archived
+tombstone: the delete loses to the transaction that needs it, which keeps history intact and keeps
+the row out of every new-transaction dropdown.
+
+**Why:** it moves the reference count to the only place it means what it says — after the whole log
+has been applied. Deferring costs one flag and buys projector totality, which is the property that
+prevents an unlaunchable app.
+
+Compaction runs in exactly two places, and the split is load-bearing:
+
+- `rebuild`, once after the event loop, inside the same transaction as the replay, so the projection
+  is never observable in the intermediate state.
+- `commit_event`, where the projection is already current and the command guard has just proved the
+  row unreferenced, so an interactive delete still takes effect immediately.
+
+It is deliberately **not** on the per-event path. Putting it there re-introduces the bug, which is
+how the seam was found: adding it to the replay-simulating test helper made the two new tests fail.
+The helper compacts at neither point, matching raw replay.
+
+Established by execution rather than by review. Two independent reviewers flagged the defect; both
+new tests — `a_delete_applied_before_the_transaction_that_needs_the_item_stays_replayable` and its
+party mirror — were written first and watched fail with SQLite extended code **787**
+(`SQLITE_CONSTRAINT_FOREIGNKEY`) before any code changed.
+
+One SQL detail cost a debugging cycle and is worth recording: `json_extract` unwraps a JSON boolean
+to integer `1`/`0`, not to `json('true')`. The first compaction query compared against `json('true')`
+and silently matched nothing.
+
+Verified against a consistent WAL-set copy of the real 242-event ledger (source untouched): full
+replay clean, `run_all_checks` passes, deleting a referenced item is refused by the guard with "used
+by 41 existing record(s)", and the merge ordering that previously bricked startup replays with the
+contested row kept at `active = 0`.
 
 ## D5 — Deletes are not reversible
 
