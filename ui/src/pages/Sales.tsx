@@ -11,6 +11,7 @@ interface Party {
   id: string;
   name: string;
   kind: string;
+  active: boolean;
 }
 
 interface Item {
@@ -18,6 +19,7 @@ interface Item {
   name: string;
   sku: string;
   unit: string;
+  active: boolean;
 }
 
 interface Sale {
@@ -48,7 +50,7 @@ export function Sales() {
   const [open, setOpen] = useState(false);
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(today());
-  const [terms, setTerms] = useState<Terms>("credit");
+  const [terms, setTerms] = useState<Terms>("cash");
   const [lines, setLines] = useState<LineDraft[]>([emptyLine()]);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -88,7 +90,10 @@ export function Sales() {
     if (terms === "cash" && !customerId) setCustomerId(WALKIN_PARTY_ID);
   }, [terms, customerId]);
 
-  const customers = parties.filter((p) => p.kind === "customer" || p.kind === "both");
+  // Archived master data stays visible in history but must not be offered for
+  // new transactions.
+  const customers = parties.filter((p) => p.active && (p.kind === "customer" || p.kind === "both"));
+  const activeItems = items.filter((i) => i.active);
 
   const updateLine = (idx: number, patch: Partial<LineDraft>) => {
     setLines((ls) => ls.map((l, i) => (i === idx ? { ...l, ...patch } : l)));
@@ -118,7 +123,7 @@ export function Sales() {
       });
       setCustomerId("");
       setDate(today());
-      setTerms("credit");
+      setTerms("cash");
       setLines([emptyLine()]);
       setOpen(false);
       toast.push(t.sales.added);
@@ -222,7 +227,7 @@ export function Sales() {
                     required
                   >
                     <option value="">{t.sales.selectItem}</option>
-                    {items.map((it) => (
+                    {activeItems.map((it) => (
                       <option key={it.id} value={it.id}>
                         {it.name} ({it.sku})
                       </option>
