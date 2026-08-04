@@ -1,7 +1,8 @@
 use crate::error::AppError;
 use crate::state::AppState;
 use accounting_core::{
-    handle_item_defined, handle_party_created, handle_purchase_recorded,
+    handle_item_defined, handle_item_deleted, handle_item_updated, handle_party_created,
+    handle_party_deleted, handle_party_updated, handle_purchase_recorded,
     handle_sale_recorded, handle_payment_received, handle_payment_made,
     handle_transaction_reversed, run_all_checks, all_passed,
     CommandContext, PurchaseLineInput, SaleLineInput, AllocInput,
@@ -59,6 +60,61 @@ pub struct PartyInput {
 pub fn create_party(state: State<AppState>, input: PartyInput) -> Result<(), AppError> {
     with_ctx!(state, |ctx| {
         handle_party_created(&mut ctx, &input.id, &input.name, &input.kind)?;
+        Ok(())
+    })
+}
+
+#[derive(Deserialize)]
+pub struct ItemUpdateInput {
+    pub id: String,
+    /// A partial document. Only the keys present are changed; `active: false`
+    /// archives the item.
+    pub changes: serde_json::Value,
+}
+
+#[tauri::command]
+pub fn update_item(state: State<AppState>, input: ItemUpdateInput) -> Result<(), AppError> {
+    with_ctx!(state, |ctx| {
+        handle_item_updated(&mut ctx, &input.id, input.changes)?;
+        Ok(())
+    })
+}
+
+#[derive(Deserialize)]
+pub struct PartyUpdateInput {
+    pub id: String,
+    pub changes: serde_json::Value,
+}
+
+#[tauri::command]
+pub fn update_party(state: State<AppState>, input: PartyUpdateInput) -> Result<(), AppError> {
+    with_ctx!(state, |ctx| {
+        handle_party_updated(&mut ctx, &input.id, input.changes)?;
+        Ok(())
+    })
+}
+
+#[derive(Deserialize)]
+pub struct DeleteInput {
+    pub id: String,
+}
+
+/// Permanently remove an item. Rejected once anything references it — the
+/// caller should archive instead, and the error says so.
+#[tauri::command]
+pub fn delete_item(state: State<AppState>, input: DeleteInput) -> Result<(), AppError> {
+    with_ctx!(state, |ctx| {
+        handle_item_deleted(&mut ctx, &input.id)?;
+        Ok(())
+    })
+}
+
+/// Permanently remove a party. Rejected once anything references it, and for
+/// the two built-in cash-trade parties.
+#[tauri::command]
+pub fn delete_party(state: State<AppState>, input: DeleteInput) -> Result<(), AppError> {
+    with_ctx!(state, |ctx| {
+        handle_party_deleted(&mut ctx, &input.id)?;
         Ok(())
     })
 }
@@ -262,15 +318,24 @@ pub struct ItemRow {
     pub name: String,
     pub sku: String,
     pub unit: String,
+    pub active: bool,
 }
 
+/// Every item, archived ones included. The frontend decides what to show:
+/// transaction forms offer only active items, while the items page can reveal
+/// the archived ones behind a toggle.
 #[tauri::command]
 pub fn list_items(state: State<AppState>) -> Result<Vec<ItemRow>, AppError> {
     let db = state.db.lock().unwrap();
+    // COALESCE, because rows written before `active` existed read NULL and a
+    // bare `active = 1` would silently hide them.
     let mut stmt = db.conn()?.prepare(
-        "SELECT id, name, sku, unit FROM items ORDER BY name")?;
+        "SELECT id, name, sku, unit, COALESCE(active, 1) FROM items ORDER BY name")?;
     let rows = stmt.query_map([], |r| {
-        Ok(ItemRow { id: r.get(0)?, name: r.get(1)?, sku: r.get(2)?, unit: r.get(3)? })
+        Ok(ItemRow {
+            id: r.get(0)?, name: r.get(1)?, sku: r.get(2)?, unit: r.get(3)?,
+            active: r.get::<_, i64>(4)? != 0,
+        })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
@@ -280,15 +345,20 @@ pub struct PartyRow {
     pub id: String,
     pub name: String,
     pub kind: String,
+    pub active: bool,
 }
 
+/// Every party, archived ones included — see [`list_items`].
 #[tauri::command]
 pub fn list_parties(state: State<AppState>) -> Result<Vec<PartyRow>, AppError> {
     let db = state.db.lock().unwrap();
     let mut stmt = db.conn()?.prepare(
-        "SELECT id, name, kind FROM parties ORDER BY name")?;
+        "SELECT id, name, kind, COALESCE(active, 1) FROM parties ORDER BY name")?;
     let rows = stmt.query_map([], |r| {
-        Ok(PartyRow { id: r.get(0)?, name: r.get(1)?, kind: r.get(2)? })
+        Ok(PartyRow {
+            id: r.get(0)?, name: r.get(1)?, kind: r.get(2)?,
+            active: r.get::<_, i64>(3)? != 0,
+        })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
@@ -356,6 +426,55 @@ pub fn list_payments(state: State<AppState>) -> Result<Vec<PaymentRow>, AppError
         Ok(PaymentRow {
             id: r.get(0)?, event_id: r.get(1)?, party_id: r.get(2)?,
             direction: r.get(3)?, amount_minor: r.get(4)?, date: r.get(5)?,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+#[derive(Serialize)]
+pub struct OpenInvoiceRow {
+    pub id: String,
+    pub date: String,
+    pub total_minor: i64,
+    pub outstanding_minor: i64,
+}
+
+#[derive(Deserialize)]
+pub struct OpenInvoicesInput {
+    pub party_id: String,
+    /// `"in"` for money received (customer sales) or `"out"` for money paid
+    /// (supplier purchases) — matching the payment direction the allocation
+    /// will belong to.
+    pub direction: String,
+}
+
+/// Unsettled invoices for one party, newest first.
+///
+/// `handle_payment_received` and `handle_payment_made` already accept
+/// allocations, and their guards require each target to belong to the paying
+/// party and to have enough outstanding balance. This query is what lets the
+/// UI offer only targets that satisfy both.
+#[tauri::command]
+pub fn list_open_invoices(
+    state: State<AppState>,
+    input: OpenInvoicesInput,
+) -> Result<Vec<OpenInvoiceRow>, AppError> {
+    let (table, party_col) = match input.direction.as_str() {
+        "in" => ("sales", "customer_id"),
+        "out" => ("purchases", "supplier_id"),
+        other => return Err(AppError { message: format!("invalid direction: {other}") }),
+    };
+    let db = state.db.lock().unwrap();
+    let sql = format!(
+        "SELECT id, date, total_minor, outstanding_minor FROM {table}
+         WHERE {party_col} = ?1 AND reversed = 0 AND outstanding_minor > 0
+         ORDER BY date DESC"
+    );
+    let mut stmt = db.conn()?.prepare(&sql)?;
+    let rows = stmt.query_map([&input.party_id], |r| {
+        Ok(OpenInvoiceRow {
+            id: r.get(0)?, date: r.get(1)?,
+            total_minor: r.get(2)?, outstanding_minor: r.get(3)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)

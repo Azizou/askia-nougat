@@ -132,6 +132,11 @@ pub fn run() {
             commands::restore_database,
             commands::export_event_log,
             commands::import_event_log,
+            commands::update_item,
+            commands::update_party,
+            commands::delete_item,
+            commands::delete_party,
+            commands::list_open_invoices,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
