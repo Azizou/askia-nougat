@@ -7,11 +7,12 @@ import { useCurrency } from "../settings";
 
 type Direction = "in" | "out";
 
+/// Every party, archived ones included. Used only to resolve names in the payment
+/// history, so a row recorded against a since-archived party still renders. The
+/// form's own dropdown comes from `PayableParty` instead.
 interface Party {
   id: string;
   name: string;
-  kind: string;
-  active: boolean;
 }
 
 interface OpenInvoice {
@@ -19,6 +20,17 @@ interface OpenInvoice {
   date: string;
   total_minor: number;
   outstanding_minor: number;
+}
+
+/// A party this form may record a payment against. The kind filter and the
+/// archived exception both live in `payable_parties` in the core, where they are
+/// testable and null-safe; see `list_payable_parties`.
+interface PayableParty {
+  id: string;
+  name: string;
+  kind: string;
+  /// Archived, and offered only because it still owes or is owed something.
+  archived: boolean;
 }
 
 interface Payment {
@@ -42,6 +54,7 @@ export function Payments() {
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [openInvoices, setOpenInvoices] = useState<OpenInvoice[]>([]);
+  const [payable, setPayable] = useState<PayableParty[]>([]);
   // Invoice id -> major-unit string the user typed. Absent or blank means
   // "apply nothing to this invoice".
   const [applied, setApplied] = useState<Record<string, string>>({});
@@ -63,6 +76,24 @@ export function Payments() {
   useEffect(() => {
     refresh();
   }, []);
+
+  // Reloaded per direction, because the archived exception is direction-specific:
+  // a party may still owe on sales while being settled up on purchases.
+  useEffect(() => {
+    let cancelled = false;
+    invoke<PayableParty[]>("list_payable_parties", { input: { direction } })
+      .then((rows) => {
+        if (!cancelled) setPayable(rows);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(errorMessage(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+    // `payments` is in the deps because recording one can settle the last open
+    // invoice, which is what removes an archived party from this list again.
+  }, [direction, payments]);
 
   useEffect(() => {
     setApplied({});
@@ -88,10 +119,11 @@ export function Payments() {
   // settle; offering them here could only produce a prepayment credited to nobody,
   // which the backend refuses.
   const isSeeded = (id: string) => id === WALKIN_PARTY_ID || id === ANON_SUPPLIER_PARTY_ID;
-  const eligible =
-    direction === "in"
-      ? parties.filter((p) => p.active && !isSeeded(p.id) && (p.kind === "customer" || p.kind === "both"))
-      : parties.filter((p) => p.active && !isSeeded(p.id) && (p.kind === "supplier" || p.kind === "both"));
+  // `payable` already applies the kind filter for this direction, and admits an
+  // archived party only while it still owes or is owed something — archiving a
+  // customer mid-collection must not remove the only screen that can settle the
+  // debt. Only the seeded-party rule is left to apply here.
+  const eligible = payable.filter((p) => !isSeeded(p.id));
 
   const partyName = (id: string) =>
     displayPartyName(
@@ -187,6 +219,7 @@ export function Payments() {
                 {eligible.map((p) => (
                   <option key={p.id} value={p.id}>
                     {displayPartyName(p.id, p.name, t.parties.walkinCustomer, t.parties.anonSupplier)}
+                    {p.archived ? ` ${t.payments.archivedSuffix}` : ""}
                   </option>
                 ))}
               </select>

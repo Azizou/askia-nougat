@@ -137,6 +137,7 @@ pub fn run() {
             commands::delete_item,
             commands::delete_party,
             commands::list_open_invoices,
+            commands::list_payable_parties,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

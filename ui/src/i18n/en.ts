@@ -150,6 +150,10 @@ export const en: Translations = {
     noOpenInvoices: "No unpaid invoices for this party.",
     allocationTotal: "Total applied",
     allocationExceeds: "Applied amount exceeds the payment.",
+    // Suffixed onto an archived party's name in the dropdown. An archived party
+    // appears only while it still owes or is owed something, so the label keeps
+    // the exception legible instead of looking like the filter failed.
+    archivedSuffix: "(archived — still outstanding)",
   },
   preferences: {
     title: "Preferences",

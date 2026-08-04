@@ -364,6 +364,43 @@ pub fn list_parties(state: State<AppState>) -> Result<Vec<PartyRow>, AppError> {
 }
 
 #[derive(Serialize)]
+pub struct PayablePartyRow {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub archived: bool,
+}
+
+#[derive(Deserialize)]
+pub struct PayablePartiesInput {
+    /// `"in"` for money received or `"out"` for money paid, matching the payment
+    /// direction the party will be recorded against.
+    pub direction: String,
+}
+
+/// Parties the payments form may offer: active ones of the matching kind, plus
+/// archived ones that still owe or are owed something.
+///
+/// The archived exception exists because archiving a party with an open invoice
+/// is deliberately allowed, and filtering the form on `active` alone left that
+/// debt unsettleable. See `accounting_core::queries::payable_parties`, where the
+/// rule lives so it can be tested — `#[tauri::command]` functions cannot be.
+#[tauri::command]
+pub fn list_payable_parties(
+    state: State<AppState>,
+    input: PayablePartiesInput,
+) -> Result<Vec<PayablePartyRow>, AppError> {
+    let db = state.db.lock().unwrap();
+    let rows = accounting_core::queries::payable_parties(db.conn()?, &input.direction)?;
+    Ok(rows
+        .into_iter()
+        .map(|p| PayablePartyRow {
+            id: p.id, name: p.name, kind: p.kind, archived: p.archived,
+        })
+        .collect())
+}
+
+#[derive(Serialize)]
 pub struct SaleRow {
     pub id: String,
     pub event_id: String,

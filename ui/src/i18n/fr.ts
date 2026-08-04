@@ -148,6 +148,7 @@ export const fr = {
     noOpenInvoices: "Aucune facture impayée pour ce tiers.",
     allocationTotal: "Total appliqué",
     allocationExceeds: "Le montant appliqué dépasse le paiement.",
+    archivedSuffix: "(archivé — solde en cours)",
   },
   preferences: {
     title: "Préférences",
