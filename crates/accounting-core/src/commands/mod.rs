@@ -52,6 +52,10 @@ pub fn commit_event(
         &tx, ctx.hlc, ctx.physical_now, &ctx.device_id, &ctx.user_id, event_type, &payload,
     )?;
     apply_event(&tx, &ev)?;
+    // An interactive delete marks the row rather than removing it (see
+    // `delete_master`); the removal happens here, where the projection is
+    // complete and up to date, so a delete still takes effect immediately.
+    crate::projectors::compact_deleted_master(&tx)?;
     tx.commit()?;
     Ok(ev)
 }
