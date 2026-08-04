@@ -88,11 +88,22 @@ export function Sales() {
 
   // Cash sales default to the walk-in customer; switching to credit must drop
   // that default, because a receivable against "Walk-in Customer" names nobody
-  // to collect from and the backend refuses it.
+  // to collect from and the backend refuses it (D10).
+  //
+  // Keyed on `terms` alone, because this belongs to the *transition* between
+  // terms and not to the current selection. With `customerId` in the deps the
+  // effect re-fired on every change of the dropdown, so a user on cash who
+  // cleared it back to the placeholder had walk-in immediately re-imposed and
+  // could not get to the empty option. `setCustomerId` is called with an updater
+  // so the current value is read without becoming a dependency.
   useEffect(() => {
-    if (terms === "cash" && !customerId) setCustomerId(WALKIN_PARTY_ID);
-    if (terms === "credit" && customerId === WALKIN_PARTY_ID) setCustomerId("");
-  }, [terms, customerId]);
+    setCustomerId((cur) => {
+      if (terms === "cash") return cur || WALKIN_PARTY_ID;
+      // A named customer stays selected when switching to credit; only the
+      // walk-in default is dropped.
+      return cur === WALKIN_PARTY_ID ? "" : cur;
+    });
+  }, [terms]);
 
   // Archived master data stays visible in history but must not be offered for
   // new transactions.
@@ -125,7 +136,10 @@ export function Sales() {
           lines: parsed,
         },
       });
-      setCustomerId("");
+      // Reset to the cash default explicitly. The terms effect keys on `terms`
+      // alone, so it does not re-fire when terms were already "cash" and cannot
+      // restore the default for us.
+      setCustomerId(WALKIN_PARTY_ID);
       setDate(today());
       setTerms("cash");
       setLines([emptyLine()]);

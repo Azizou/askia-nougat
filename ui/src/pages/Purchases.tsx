@@ -90,10 +90,19 @@ export function Purchases() {
   // unrecorded seller needs no named supplier, so default to the seeded one.
   // Credit must clear it — a payable to "Cash Supplier" names nobody to pay,
   // and the backend refuses it.
+  //
+  // Keyed on `terms` alone, for the same reason as the sales form: with
+  // `supplierId` in the deps the effect re-fired on every dropdown change, so a
+  // user on cash who cleared the selection had the default immediately
+  // re-imposed and could never reach the empty option.
   useEffect(() => {
-    if (terms === "cash" && !supplierId) setSupplierId(ANON_SUPPLIER_PARTY_ID);
-    if (terms === "credit" && supplierId === ANON_SUPPLIER_PARTY_ID) setSupplierId("");
-  }, [terms, supplierId]);
+    setSupplierId((cur) => {
+      if (terms === "cash") return cur || ANON_SUPPLIER_PARTY_ID;
+      // A named supplier survives the switch to credit; only the seeded default
+      // is dropped.
+      return cur === ANON_SUPPLIER_PARTY_ID ? "" : cur;
+    });
+  }, [terms]);
 
   // Archived master data stays visible in history but must not be offered for
   // new transactions.
@@ -134,7 +143,9 @@ export function Purchases() {
           lines: parsed,
         },
       });
-      setSupplierId("");
+      // Reset to the cash default explicitly: the terms effect keys on `terms`
+      // alone and so cannot restore it when terms were already "cash".
+      setSupplierId(ANON_SUPPLIER_PARTY_ID);
       setDate(today());
       setTerms("cash");
       setLines([emptyLine()]);
