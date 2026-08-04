@@ -126,6 +126,32 @@ The guard lives in the core rather than only in the form because `import_event_l
 command from another device, and because three separate call sites shared the same shape — the
 expense case was found by checking the mirror of the two obvious ones.
 
+## D11 — The seeded parties also take no payment
+
+`check_seeded_party_takes_no_payment` refuses `handle_payment_received` and
+`handle_payment_made` for both seeded ids, and the payments dropdown filters them out.
+
+**Why:** D10 closed credit trade, which means a seeded party can never hold an invoice.
+A payment therefore has nothing to settle, so it could only land as an *unallocated
+prepayment* — `unallocated_cr_minor` credited to a party that identifies nobody, and which
+no future invoice can ever draw down, because no future invoice can exist. That is the same
+defect as D10 one route further along: a permanent balance owed to no one.
+
+Found by asking what else can move a party balance after fixing the terms paths. The answer
+was payments, and unlike the sales and purchases forms the payments form has no
+auto-selection — but it did list both seeded parties in its dropdown, so the path was
+reachable by an ordinary click rather than only by import.
+
+`handle_payment_allocated` needs no guard: it requires an existing payment owned by the
+party, which is now unreachable, and `check_credit_overdraw` independently refuses an
+allocation against a zero credit balance.
+
+Checked against the user's real 242-event ledger before adding the guard: it contains no
+credit sale to the walk-in customer, no credit purchase from the anonymous supplier, no
+payment referencing either, and no `party_balances` row for either. So neither D10 nor D11
+can reject anything already recorded. Both are command guards in any case, so replay of an
+existing log is unaffected — per D4, only guards reject.
+
 ## Outstanding
 
 The allocation flow is verified at the Rust level against a copy of a real 242-event ledger, in both
@@ -135,5 +161,11 @@ refused. What has **not** run is the React allocation table itself in the Tauri 
 `invoke` directly with no browser fallback, so no headless path exercises it. The `invoke` payloads
 were instead checked field by field against the Rust `Deserialize` structs.
 
-Gates at the close of this work: 216 Rust tests, `cargo clippy --all-targets -- -D warnings`,
+Gates at the close of this work: 217 Rust tests, `cargo clippy --all-targets -- -D warnings`,
 `tsc --noEmit`, and `vite build` all clean.
+
+Three checks need the running Tauri app and have not been performed: that archiving an item
+removes it from the new-sale dropdown while leaving it on past sales, that deleting an unused
+item succeeds where a sold one is refused, and that a cash purchase left untouched books
+against the Cash Supplier. Each is verified at the Rust and query level; what is unverified is
+only the wiring in between.
