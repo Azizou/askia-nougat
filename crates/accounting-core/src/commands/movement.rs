@@ -1,6 +1,6 @@
 use crate::commands::guards::{check_amount_non_negative, check_amount_positive,
     check_at_least_one_line, check_expense_account_type, check_lot_item_match,
-    check_qty_positive, check_self_transfer, LotDemand};
+    check_qty_positive, check_seeded_party_cash_only, check_self_transfer, LotDemand};
 use crate::commands::{commit_event, reject, CommandContext, CommandError};
 use rusqlite::OptionalExtension;
 use serde_json::json;
@@ -25,6 +25,7 @@ pub fn handle_expense_recorded(
     match (terms, supplier_id) {
         ("credit", None) => return Err(reject("credit expense requires a supplierId")),
         ("credit", Some(sup)) => {
+            check_seeded_party_cash_only(sup, terms)?;
             let found: Option<String> = ctx.conn.query_row(
                 "SELECT kind FROM parties WHERE id = ?1", [sup], |r| r.get(0)).optional()?;
             match found {

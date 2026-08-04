@@ -1,5 +1,5 @@
 use crate::commands::guards::{check_amount_non_negative, check_at_least_one_line,
-    check_lot_item_match, check_qty_positive, LotDemand};
+    check_lot_item_match, check_qty_positive, check_seeded_party_cash_only, LotDemand};
 use crate::commands::{commit_event, reject, CommandContext, CommandError};
 use serde_json::json;
 
@@ -35,6 +35,7 @@ pub fn handle_purchase_recorded(
 ) -> Result<crate::events::LedgerEvent, CommandError> {
     check_at_least_one_line(&lines)?;
     if !matches!(terms, "cash"|"credit") { return Err(reject(format!("invalid terms: {terms}"))); }
+    check_seeded_party_cash_only(supplier_id, terms)?;
     ensure_party(ctx, supplier_id, &["supplier"])?;
     for l in &lines {
         check_qty_positive(l.qty)?;
@@ -202,5 +203,35 @@ mod tests {
         let err = handle_purchase_return_recorded(&mut c, "pret1", "pur1", "2026-03-01",
             vec![PurchaseReturnLineInput{ item_id:"itemB".into(), lot_id:"pur1#lot0".into(), qty:1, unit_cost_minor:500 }]).unwrap_err();
         assert!(matches!(err, CommandError::Validation(_)));
+    }
+
+    #[test]
+    fn credit_purchase_from_the_anonymous_supplier_is_rejected() {
+        let (mut conn, mut hlc) = fixture();
+        seed_master(&mut conn, &mut hlc);
+        crate::genesis::ensure_anon_supplier(&conn, &mut hlc, 1000, "deviceA").unwrap();
+        crate::projectors::rebuild(&mut conn).unwrap();
+
+        // Cash is the default path the purchases form takes and must still work.
+        {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_purchase_recorded(&mut c, "pur_cash", crate::genesis::ANON_SUPPLIER_PARTY_ID,
+                "2026-02-01", "cash",
+                vec![PurchaseLineInput{ item_id:"itemA".into(), qty:5, unit_cost_minor:500 }])
+                .expect("cash purchase from the anonymous supplier must be allowed");
+        }
+        // Credit would book a payable to a supplier the business cannot pay.
+        let err = {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_purchase_recorded(&mut c, "pur_credit", crate::genesis::ANON_SUPPLIER_PARTY_ID,
+                "2026-02-01", "credit",
+                vec![PurchaseLineInput{ item_id:"itemA".into(), qty:5, unit_cost_minor:500 }])
+                .unwrap_err()
+        };
+        assert!(matches!(err, CommandError::Validation(_)));
+        let payable: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(payable_minor), 0) FROM party_balances WHERE party_id = ?1",
+            [crate::genesis::ANON_SUPPLIER_PARTY_ID], |r| r.get(0)).unwrap();
+        assert_eq!(payable, 0, "the anonymous supplier must never carry a payable");
     }
 }

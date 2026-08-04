@@ -86,8 +86,12 @@ export function Sales() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Cash sales default to the walk-in customer; switching to credit must drop
+  // that default, because a receivable against "Walk-in Customer" names nobody
+  // to collect from and the backend refuses it.
   useEffect(() => {
     if (terms === "cash" && !customerId) setCustomerId(WALKIN_PARTY_ID);
+    if (terms === "credit" && customerId === WALKIN_PARTY_ID) setCustomerId("");
   }, [terms, customerId]);
 
   // Archived master data stays visible in history but must not be offered for

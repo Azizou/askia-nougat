@@ -198,6 +198,27 @@ pub(crate) fn check_credit_overdraw(
     } else { Ok(()) }
 }
 
+/// The seeded walk-in customer and anonymous supplier stand in for counterparties
+/// the business never recorded, so they cannot carry a balance: a receivable
+/// against "Walk-in Customer" names nobody to collect from. Cash trade with them
+/// is the whole point; credit trade is always a mistake.
+///
+/// The UI clears its auto-selection when the user switches to credit, so this
+/// guard is the backstop for a manual pick or an imported command.
+pub(crate) fn check_seeded_party_cash_only(party_id: &str, terms: &str)
+-> Result<(), CommandError> {
+    if terms == "credit"
+        && (party_id == crate::genesis::WALKIN_PARTY_ID
+            || party_id == crate::genesis::ANON_SUPPLIER_PARTY_ID)
+    {
+        return Err(reject(format!(
+            "{party_id} is a built-in party for cash trade and cannot be used on credit; \
+             record the counterparty first"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn check_self_transfer(from: &str, to: &str) -> Result<(), CommandError> {
     if from == to { Err(reject(format!("self-transfer: from == to ({from})"))) } else { Ok(()) }
 }
@@ -484,6 +505,20 @@ mod tests {
     fn self_transfer_rejected() {
         assert!(check_self_transfer("a1", "a1").is_err());
         assert!(check_self_transfer("a1", "a2").is_ok());
+    }
+
+    #[test]
+    fn seeded_parties_may_trade_for_cash_but_not_on_credit() {
+        for id in [crate::genesis::WALKIN_PARTY_ID, crate::genesis::ANON_SUPPLIER_PARTY_ID] {
+            assert!(check_seeded_party_cash_only(id, "cash").is_ok(), "{id} cash must be allowed");
+            assert!(
+                check_seeded_party_cash_only(id, "credit").is_err(),
+                "{id} on credit would book a balance against nobody"
+            );
+        }
+        // An ordinary party is unaffected on either terms.
+        assert!(check_seeded_party_cash_only("party_7", "credit").is_ok());
+        assert!(check_seeded_party_cash_only("party_7", "cash").is_ok());
     }
 
     #[test]

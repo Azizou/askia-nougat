@@ -88,8 +88,11 @@ export function Purchases() {
 
   // Mirrors the walk-in customer on the sales form: a cash purchase from an
   // unrecorded seller needs no named supplier, so default to the seeded one.
+  // Credit must clear it — a payable to "Cash Supplier" names nobody to pay,
+  // and the backend refuses it.
   useEffect(() => {
     if (terms === "cash" && !supplierId) setSupplierId(ANON_SUPPLIER_PARTY_ID);
+    if (terms === "credit" && supplierId === ANON_SUPPLIER_PARTY_ID) setSupplierId("");
   }, [terms, supplierId]);
 
   // Archived master data stays visible in history but must not be offered for
