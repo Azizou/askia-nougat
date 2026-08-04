@@ -1182,3 +1182,6 @@ td.mono {
 .faq-item.open .faq-question {
   color: var(--accent);
 }
+
+.row-archived { opacity: 0.55; }
+.inline-toggle { display: inline-flex; align-items: center; gap: 0.4rem; margin: 0.5rem 0; }

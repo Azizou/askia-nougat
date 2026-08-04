@@ -9,6 +9,7 @@ interface Item {
   name: string;
   sku: string;
   unit: string;
+  active: boolean;
 }
 
 export function Items() {
@@ -20,8 +21,15 @@ export function Items() {
   const [unit, setUnit] = useState("ea");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [showArchived, setShowArchived] = useState(false);
+  const [editing, setEditing] = useState<Item | null>(null);
+  const [editSku, setEditSku] = useState("");
+  const [editName, setEditName] = useState("");
+  const [editUnit, setEditUnit] = useState("");
   const skuInput = useRef<HTMLInputElement | null>(null);
   const toast = useToast();
+
+  const visible = showArchived ? items : items.filter((i) => i.active);
 
   const refresh = async () => {
     try {
@@ -66,6 +74,63 @@ export function Items() {
       toast.push(errorMessage(e), "error");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const beginEdit = (i: Item) => {
+    setEditing(i);
+    setEditSku(i.sku);
+    setEditName(i.name);
+    setEditUnit(i.unit);
+    setError("");
+  };
+
+  const saveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editing) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      // Send only what changed: `changes` is merged into the stored document,
+      // so an unchanged key is a no-op but a wrong one is a silent overwrite.
+      const changes: Record<string, string> = {};
+      if (editSku !== editing.sku) changes.sku = editSku;
+      if (editName !== editing.name) changes.name = editName;
+      if (editUnit !== editing.unit) changes.unit = editUnit;
+      if (Object.keys(changes).length > 0) {
+        await invoke("update_item", { input: { id: editing.id, changes } });
+        toast.push(t.common.saved);
+      }
+      setEditing(null);
+      await refresh();
+    } catch (e: unknown) {
+      setError(errorMessage(e));
+      toast.push(errorMessage(e), "error");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const setArchived = async (i: Item, archived: boolean) => {
+    try {
+      await invoke("update_item", { input: { id: i.id, changes: { active: !archived } } });
+      toast.push(archived ? t.common.archived : t.common.restored);
+      await refresh();
+    } catch (e: unknown) {
+      toast.push(errorMessage(e), "error");
+    }
+  };
+
+  const remove = async (i: Item) => {
+    if (!window.confirm(t.common.deleteConfirm)) return;
+    try {
+      await invoke("delete_item", { input: { id: i.id } });
+      toast.push(t.common.deleted);
+      await refresh();
+    } catch (e: unknown) {
+      // The backend refuses to delete anything already referenced and says so;
+      // surfacing its message is what tells the user to archive instead.
+      toast.push(errorMessage(e), "error");
     }
   };
 
@@ -129,7 +194,47 @@ export function Items() {
         </div>
       </section>
 
-      {items.length === 0 ? (
+      {editing && (
+        <section className="panel">
+          <h2 style={{ marginTop: 0 }}>{t.items.editTitle}</h2>
+          <form onSubmit={saveEdit} className="form">
+            <div className="form-row">
+              <label>
+                {t.items.sku}
+                <input value={editSku} onChange={(e) => setEditSku(e.target.value)} required />
+              </label>
+              <label>
+                {t.items.name}
+                <input value={editName} onChange={(e) => setEditName(e.target.value)} required />
+              </label>
+              <label>
+                {t.items.unit}
+                <input value={editUnit} onChange={(e) => setEditUnit(e.target.value)} required />
+              </label>
+            </div>
+            <div className="form-actions">
+              <button type="button" className="secondary" onClick={() => setEditing(null)} disabled={submitting}>
+                {t.common.cancel}
+              </button>
+              <button type="submit" className="primary" disabled={submitting}>
+                {submitting ? t.common.saving : t.common.save}
+              </button>
+            </div>
+            {error && <p className="error">{error}</p>}
+          </form>
+        </section>
+      )}
+
+      <label className="inline-toggle">
+        <input
+          type="checkbox"
+          checked={showArchived}
+          onChange={(e) => setShowArchived(e.target.checked)}
+        />
+        {t.common.showArchived}
+      </label>
+
+      {visible.length === 0 ? (
         <div className="table-wrap">
           <div className="empty">{t.items.empty}</div>
         </div>
@@ -142,15 +247,26 @@ export function Items() {
                 <th>{t.items.name}</th>
                 <th>{t.items.unit}</th>
                 <th>{t.common.id}</th>
+                <th>{t.common.actions}</th>
               </tr>
             </thead>
             <tbody>
-              {items.map((i) => (
-                <tr key={i.id}>
+              {visible.map((i) => (
+                <tr key={i.id} className={i.active ? undefined : "row-archived"}>
                   <td>{i.sku}</td>
-                  <td>{i.name}</td>
+                  <td>
+                    {i.name}
+                    {!i.active && <span className="badge"> {t.common.archivedBadge}</span>}
+                  </td>
                   <td>{i.unit}</td>
                   <td className="mono">{i.id.slice(0, 8)}...</td>
+                  <td>
+                    <button className="ghost" onClick={() => beginEdit(i)}>{t.common.edit}</button>
+                    <button className="ghost" onClick={() => setArchived(i, i.active)}>
+                      {i.active ? t.common.archive : t.common.restore}
+                    </button>
+                    <button className="ghost" onClick={() => remove(i)}>{t.common.delete}</button>
+                  </td>
                 </tr>
               ))}
             </tbody>
