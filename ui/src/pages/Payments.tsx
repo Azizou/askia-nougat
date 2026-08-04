@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { majorToMinor, newId, today, errorMessage, displayPartyName } from "../lib";
+import { majorToMinor, newId, today, errorMessage, displayPartyName, WALKIN_PARTY_ID, ANON_SUPPLIER_PARTY_ID } from "../lib";
 import { useToast } from "../theme";
 import { useI18n } from "../i18n";
 import { useCurrency } from "../settings";
@@ -84,10 +84,14 @@ export function Payments() {
     };
   }, [partyId, direction]);
 
+  // The seeded parties trade for cash only, so they can never hold an invoice to
+  // settle; offering them here could only produce a prepayment credited to nobody,
+  // which the backend refuses.
+  const isSeeded = (id: string) => id === WALKIN_PARTY_ID || id === ANON_SUPPLIER_PARTY_ID;
   const eligible =
     direction === "in"
-      ? parties.filter((p) => p.active && (p.kind === "customer" || p.kind === "both"))
-      : parties.filter((p) => p.active && (p.kind === "supplier" || p.kind === "both"));
+      ? parties.filter((p) => p.active && !isSeeded(p.id) && (p.kind === "customer" || p.kind === "both"))
+      : parties.filter((p) => p.active && !isSeeded(p.id) && (p.kind === "supplier" || p.kind === "both"));
 
   const partyName = (id: string) =>
     displayPartyName(

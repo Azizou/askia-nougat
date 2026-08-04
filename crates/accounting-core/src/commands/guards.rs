@@ -207,13 +207,33 @@ pub(crate) fn check_credit_overdraw(
 /// guard is the backstop for a manual pick or an imported command.
 pub(crate) fn check_seeded_party_cash_only(party_id: &str, terms: &str)
 -> Result<(), CommandError> {
-    if terms == "credit"
-        && (party_id == crate::genesis::WALKIN_PARTY_ID
-            || party_id == crate::genesis::ANON_SUPPLIER_PARTY_ID)
-    {
+    if terms == "credit" && is_seeded_party(party_id) {
         return Err(reject(format!(
             "{party_id} is a built-in party for cash trade and cannot be used on credit; \
              record the counterparty first"
+        )));
+    }
+    Ok(())
+}
+
+fn is_seeded_party(party_id: &str) -> bool {
+    party_id == crate::genesis::WALKIN_PARTY_ID
+        || party_id == crate::genesis::ANON_SUPPLIER_PARTY_ID
+}
+
+/// A settlement payment presupposes an invoice, and the guard above makes it
+/// impossible for a seeded party to have one. So every payment to or from them
+/// is necessarily an unallocated prepayment — a credit balance owed to a party
+/// that by construction identifies nobody, which can never be drawn down.
+///
+/// This closes the last route to a seeded-party balance: the payments form does
+/// not auto-select them, but it does offer them in its dropdown.
+pub(crate) fn check_seeded_party_takes_no_payment(party_id: &str)
+-> Result<(), CommandError> {
+    if is_seeded_party(party_id) {
+        return Err(reject(format!(
+            "{party_id} is a built-in party for immediate cash trade and cannot send or \
+             receive a settlement payment; record the counterparty first"
         )));
     }
     Ok(())

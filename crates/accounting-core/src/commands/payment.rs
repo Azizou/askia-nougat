@@ -1,5 +1,6 @@
 use crate::commands::guards::{check_allocation_party_ownership, check_amount_positive,
-    check_credit_overdraw, check_invoice_over_allocation_aggregated, check_payment_over_allocation};
+    check_credit_overdraw, check_invoice_over_allocation_aggregated, check_payment_over_allocation,
+    check_seeded_party_takes_no_payment};
 use crate::commands::{commit_event, reject, CommandContext, CommandError};
 use rusqlite::OptionalExtension;
 use serde_json::json;
@@ -51,6 +52,7 @@ pub fn handle_payment_made(
     amount_minor: i64, date: &str, allocations: Vec<AllocInput>,
 ) -> Result<crate::events::LedgerEvent, CommandError> {
     check_amount_positive(amount_minor)?;
+    check_seeded_party_takes_no_payment(supplier_id)?;
     ensure_party_kind(ctx, supplier_id, &["supplier"])?;
     validate_payment_allocations(ctx, supplier_id, "out", amount_minor, &allocations)?;
     let payload = json!({
@@ -66,6 +68,7 @@ pub fn handle_payment_received(
     amount_minor: i64, date: &str, allocations: Vec<AllocInput>,
 ) -> Result<crate::events::LedgerEvent, CommandError> {
     check_amount_positive(amount_minor)?;
+    check_seeded_party_takes_no_payment(customer_id)?;
     ensure_party_kind(ctx, customer_id, &["customer"])?;
     validate_payment_allocations(ctx, customer_id, "in", amount_minor, &allocations)?;
     let payload = json!({
@@ -222,5 +225,46 @@ mod tests {
         }
         let cr: i64 = conn.query_row("SELECT unallocated_cr_minor FROM party_balances WHERE party_id='cust1'", [], |r| r.get(0)).unwrap();
         assert_eq!(cr, 0);
+    }
+
+    /// The seeded parties can never hold an invoice, so a payment to or from them
+    /// could only ever be an unallocated prepayment against nobody. The payments
+    /// form offers them in its dropdown, so the guard has to be here.
+    #[test]
+    fn the_seeded_parties_can_neither_send_nor_receive_a_payment() {
+        let (mut conn, mut hlc) = fixture();
+        seed_credit_sale(&mut conn, &mut hlc);
+        crate::genesis::ensure_walkin_party(&conn, &mut hlc, 1000, "deviceA").unwrap();
+        crate::genesis::ensure_anon_supplier(&conn, &mut hlc, 1000, "deviceA").unwrap();
+        crate::projectors::rebuild(&mut conn).unwrap();
+
+        let recv_err = {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_payment_received(&mut c, "pay_walkin", crate::genesis::WALKIN_PARTY_ID,
+                5000, "2026-03-01", vec![]).unwrap_err()
+        };
+        assert!(matches!(recv_err, CommandError::Validation(_)));
+        let made_err = {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_payment_made(&mut c, "pay_anon", crate::genesis::ANON_SUPPLIER_PARTY_ID,
+                5000, "2026-03-01", vec![]).unwrap_err()
+        };
+        assert!(matches!(made_err, CommandError::Validation(_)));
+
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM events WHERE type LIKE 'Payment%'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "neither rejected payment may reach the log");
+        let held: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(unallocated_cr_minor + unallocated_dr_minor), 0)
+             FROM party_balances WHERE party_id IN (?1, ?2)",
+            [crate::genesis::WALKIN_PARTY_ID, crate::genesis::ANON_SUPPLIER_PARTY_ID],
+            |r| r.get(0)).unwrap();
+        assert_eq!(held, 0, "a seeded party must never hold an undrawable credit");
+
+        // An ordinary party still takes an unallocated prepayment.
+        {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_payment_received(&mut c, "pay_ok", "cust2", 5000, "2026-03-01", vec![])
+                .expect("ordinary parties are unaffected");
+        }
     }
 }
