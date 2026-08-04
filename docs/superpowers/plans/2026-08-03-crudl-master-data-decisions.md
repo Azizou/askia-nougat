@@ -211,6 +211,102 @@ payment referencing either, and no `party_balances` row for either. So neither D
 can reject anything already recorded. Both are command guards in any case, so replay of an
 existing log is unaffected — per D4, only guards reject.
 
+## D13 — A return settles by the original's terms, never by whether a party is named
+
+`sale_return` and `purchase_return` chose the refund account and the balance update by asking whether
+the original transaction had a customer or supplier. Both now ask the original's `terms` instead:
+
+```sql
+SELECT CASE WHEN terms = 'credit' THEN customer_id END FROM sales WHERE id = ?1
+```
+
+**Why:** a cash sale also stores a `customer_id`. It is the walk-in party for an anonymous counter
+sale, and a named party when the customer is known but paid on the spot. So the presence of a
+customer says nothing about how a refund must be settled — only the terms do. Gating on the party
+refunded every cash return to Accounts Receivable instead of the till, and additionally credited the
+customer an unallocated credit they were never owed: a cash sale has `outstanding_minor = 0`, so
+`reduce` computed to 0 and the whole refund fell through the excess branch. A probe on a cash sale
+return printed `unallocated_cr=3000 AR_credit=3000 bank_credit=0`, which is both halves of the
+defect in one line. The `purchase_return` mirror was identical and was found by checking it in the
+same pass rather than after a second report.
+
+`terms` is `NOT NULL` in both tables and predates this work, so no migration was needed.
+
+**Reachable today only through import.** No return command is registered in `generate_handler!`, so
+the UI cannot reach either projector; `import_event_log` can, because per D4 it replays raw events
+without guards. That omission is load-bearing for the defect's blast radius, which is exactly why it
+is recorded here rather than relied on silently — registering a return command later re-opens the
+path, and the fix has to already be in place when that happens. This amends D9, which lists returns
+as deferred but does not say that the deferral is what kept a real projector bug out of reach.
+
+## D14 — The walk-in seed states `active` explicitly
+
+`ensure_walkin_party` omitted `active` from its payload, so the projection wrote `active = NULL`,
+while `ensure_anon_supplier` stated `"active": true`. Now both state it.
+
+**Why:** symmetry and future-proofing, not a live bug — and the difference matters, so it is stated
+plainly. Every SQL read path is null-safe per D3 (`list_parties` selects `COALESCE(active, 1)`),
+which I checked exhaustively rather than assumed. What the asymmetry threatened was a query that
+ever returned the raw column: `p.active` in the sales form is a truthiness test, so a `NULL` would
+silently drop the walk-in party from the very dropdown the cash default depends on.
+
+**Limitation, stated because it is easy to misread:** the seed is guarded on the log, so this reaches
+fresh installs only. An install that has already emitted the event keeps the payload it has, forever.
+D3's null-safety is what protects those, not this line.
+
+## D15 — An archived party stays payable while it still owes or is owed
+
+`queries::payable_parties(conn, direction)` returns the parties the payments form may offer: those of
+the right kind that are active, **plus** archived ones that still have an unreversed invoice with
+`outstanding_minor > 0` or a non-zero unallocated balance. The form applies only the seeded-party rule
+on top. Archived rows sort last and are labelled — "(archived — still outstanding)" /
+"(archivé — solde en cours)".
+
+**Why:** archiving a party with an open invoice is deliberately allowed, and `list_open_invoices` has
+no `active` predicate, so the debt stayed visible in aging. Only the form was refusing. The result was
+a balance the user could see and had no screen to settle. The unallocated clause is not redundant with
+the invoice clause: a prepayment has no invoice at all, and drawing it down is precisely what
+`PaymentAllocated` needs the party present for.
+
+The rule lives in the core rather than in the Tauri command because `#[tauri::command]` functions
+cannot be unit-tested; five tests cover it, including the inverse (an archived party with nothing
+outstanding drops out) and an unknown direction.
+
+A first sabotage of this SQL was worthless and the reason is worth keeping: I replaced the first `OR`
+with `AND` and all four archived tests still passed, because `AND` binds tighter than `OR` and the
+balance clause still matched on its own. Replacing the whole disjunction with `AND COALESCE(active,1)=1`
+turned three of them red. A sabotage has to actually remove the behaviour, not just perturb the text.
+
+## D16 — The cash default keys on the terms transition, not on the current selection
+
+The auto-select effects in the sales and purchases forms now depend on `[terms]` alone and read the
+current value through an updater callback. Post-submit resets set the seeded party explicitly.
+
+**Why:** with the party id in the deps the effect re-fired on every dropdown change, so a user on cash
+who cleared the selection back to the placeholder had the default re-imposed instantly and could never
+reach the empty option. The default belongs to the *transition* between terms, not to the current
+selection. The explicit reset after submit is required by the same change: the effect no longer
+re-fires when terms were already `"cash"`, so it cannot restore the default on its own.
+
+## D17 — The reference-list drift check derives from the schema, not from a second list
+
+`every_referencing_column_is_listed` now walks `sqlite_master`, collects every column named `item_id`,
+`party_id`, `customer_id` or `supplier_id`, and fails naming any that `ITEM_REFS`/`PARTY_REFS` omit.
+It keeps the converse (every listed column exists) and asserts the two counts match.
+
+**Why:** the previous version enumerated the same nine columns the constants already hold and asserted
+each was present — "my list is a subset of my list". A new table with an `item_id` passed it untouched,
+which is exactly the drift it existed to catch, and the consequence is a delete guard counting zero
+references for a row that has some.
+
+The naming convention is the ground truth here, not `PRAGMA foreign_key_list`: only five of the nine
+columns declare a real FK — `sales.customer_id` and `payments.party_id` among those that do not — so
+an FK-derived check would miss the majority.
+
+Necessity was proven rather than argued. Appending a `sabotage_stocktake(item_id REFERENCES items(id))`
+table makes the new test fail with `["sabotage_stocktake.item_id"]`; the same schema change run against
+the stashed old test passed.
+
 ## Outstanding
 
 The allocation flow is verified at the Rust level against a copy of a real 242-event ledger, in both
@@ -220,11 +316,18 @@ refused. What has **not** run is the React allocation table itself in the Tauri 
 `invoke` directly with no browser fallback, so no headless path exercises it. The `invoke` payloads
 were instead checked field by field against the Rust `Deserialize` structs.
 
-Gates at the close of this work: 217 Rust tests, `cargo clippy --all-targets -- -D warnings`,
-`tsc --noEmit`, and `vite build` all clean.
+Gates at the close of this work: 228 Rust tests (205 in `accounting-core`, 23 in `tauri-app`),
+`cargo clippy --all-targets -- -D warnings`, `tsc --noEmit`, and `vite build` all clean.
 
-Three checks need the running Tauri app and have not been performed: that archiving an item
+Four checks need the running Tauri app and have not been performed: that archiving an item
 removes it from the new-sale dropdown while leaving it on past sales, that deleting an unused
-item succeeds where a sold one is refused, and that a cash purchase left untouched books
-against the Cash Supplier. Each is verified at the Rust and query level; what is unverified is
-only the wiring in between.
+item succeeds where a sold one is refused, that a cash purchase left untouched books against
+the Cash Supplier, and the React allocation table above. Each is verified at the Rust and query
+level; what is unverified is only the wiring in between.
+
+Remaining low-severity items, left open deliberately: the Items and Parties panel headers count
+unfiltered rows, so the number includes archived entries the list may be hiding; each page shares
+one `error`/`submitting` pair between its create and edit forms, so an error from one shows above
+the other; `noOpenInvoices` renders during the in-flight fetch before any row arrives; two
+`displayPartyName` calls in `Sales.tsx` omit the anonymous-supplier argument, which is harmless
+because a sale can never reference it; and `common.status` is an unreferenced i18n key.
