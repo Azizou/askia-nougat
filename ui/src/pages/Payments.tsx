@@ -11,6 +11,14 @@ interface Party {
   id: string;
   name: string;
   kind: string;
+  active: boolean;
+}
+
+interface OpenInvoice {
+  id: string;
+  date: string;
+  total_minor: number;
+  outstanding_minor: number;
 }
 
 interface Payment {
@@ -33,6 +41,10 @@ export function Payments() {
   const [date, setDate] = useState(today());
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [openInvoices, setOpenInvoices] = useState<OpenInvoice[]>([]);
+  // Invoice id -> major-unit string the user typed. Absent or blank means
+  // "apply nothing to this invoice".
+  const [applied, setApplied] = useState<Record<string, string>>({});
   const toast = useToast();
 
   const refresh = async () => {
@@ -52,28 +64,77 @@ export function Payments() {
     refresh();
   }, []);
 
+  useEffect(() => {
+    setApplied({});
+    if (!partyId) {
+      setOpenInvoices([]);
+      return;
+    }
+    let cancelled = false;
+    invoke<OpenInvoice[]>("list_open_invoices", { input: { party_id: partyId, direction } })
+      .then((rows) => {
+        // Guard against a stale response landing after the user has moved on.
+        if (!cancelled) setOpenInvoices(rows);
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(errorMessage(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [partyId, direction]);
+
   const eligible =
     direction === "in"
-      ? parties.filter((p) => p.kind === "customer" || p.kind === "both")
-      : parties.filter((p) => p.kind === "supplier" || p.kind === "both");
+      ? parties.filter((p) => p.active && (p.kind === "customer" || p.kind === "both"))
+      : parties.filter((p) => p.active && (p.kind === "supplier" || p.kind === "both"));
 
   const partyName = (id: string) =>
-    displayPartyName(id, parties.find((p) => p.id === id)?.name ?? id, t.parties.walkinCustomer);
+    displayPartyName(
+      id,
+      parties.find((p) => p.id === id)?.name ?? id,
+      t.parties.walkinCustomer,
+      t.parties.anonSupplier,
+    );
+
+  const allocations = () =>
+    Object.entries(applied)
+      .filter(([, major]) => major.trim() !== "" && Number(major) > 0)
+      .map(([target_id, major]) => ({
+        target_id,
+        // `check_allocation_party_ownership` requires the target type to match
+        // the direction: money in settles sales, money out settles purchases.
+        target_type: direction === "in" ? "sale" : "purchase",
+        amount_minor: majorToMinor(major),
+      }));
+
+  const allocatedMinor = allocations().reduce((sum, a) => sum + a.amount_minor, 0);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    const amount_minor = majorToMinor(amountMajor);
+    const allocs = allocations();
+    const total = allocs.reduce((sum, a) => sum + a.amount_minor, 0);
+    if (total > amount_minor) {
+      // The backend rejects this too; catching it here avoids a round trip and
+      // gives the message in the user's language.
+      setError(t.payments.allocationExceeds);
+      return;
+    }
     setSubmitting(true);
     try {
       const command = direction === "in" ? "record_payment" : "record_payment_made";
+      const base = { id: newId(), amount_minor, date, allocations: allocs };
       const input =
         direction === "in"
-          ? { id: newId(), customer_id: partyId, amount_minor: majorToMinor(amountMajor), date, allocations: [] }
-          : { id: newId(), supplier_id: partyId, amount_minor: majorToMinor(amountMajor), date, allocations: [] };
+          ? { ...base, customer_id: partyId }
+          : { ...base, supplier_id: partyId };
       await invoke(command, { input });
       toast.push(direction === "in" ? t.payments.added : t.payments.paidMade);
       setPartyId("");
       setAmountMajor("");
+      setApplied({});
       setDate(today());
       await refresh();
     } catch (e: unknown) {
@@ -120,7 +181,9 @@ export function Payments() {
                   {direction === "in" ? t.payments.selectCustomer : t.payments.selectSupplier}
                 </option>
                 {eligible.map((p) => (
-                  <option key={p.id} value={p.id}>{displayPartyName(p.id, p.name, t.parties.walkinCustomer)}</option>
+                  <option key={p.id} value={p.id}>
+                    {displayPartyName(p.id, p.name, t.parties.walkinCustomer, t.parties.anonSupplier)}
+                  </option>
                 ))}
               </select>
             </label>
@@ -140,6 +203,59 @@ export function Payments() {
               <input type="date" value={date} onChange={(e) => setDate(e.target.value)} required />
             </label>
           </div>
+
+          {partyId && (
+            <div className="lines">
+              <div className="lines-header">
+                <strong>{t.payments.allocate}</strong>
+                <span className="shortcut-hint">{t.payments.allocateHint}</span>
+              </div>
+              {openInvoices.length === 0 ? (
+                <div className="empty">{t.payments.noOpenInvoices}</div>
+              ) : (
+                <>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{t.payments.invoice}</th>
+                        <th>{t.common.date}</th>
+                        <th className="num">{t.payments.invoiceOutstanding}</th>
+                        <th className="num">{t.payments.allocateAmount}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {openInvoices.map((inv) => (
+                        <tr key={inv.id}>
+                          <td className="mono">{inv.id.slice(0, 8)}...</td>
+                          <td>{inv.date}</td>
+                          <td className="num">{format(inv.outstanding_minor)}</td>
+                          <td className="num">
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0"
+                              // The backend refuses to over-allocate an
+                              // invoice; capping here says so before submitting.
+                              max={inv.outstanding_minor / 100}
+                              placeholder="0.00"
+                              value={applied[inv.id] ?? ""}
+                              onChange={(e) =>
+                                setApplied((prev) => ({ ...prev, [inv.id]: e.target.value }))
+                              }
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p>
+                    {t.payments.allocationTotal}: {format(allocatedMinor)}
+                  </p>
+                </>
+              )}
+            </div>
+          )}
+
           <div className="form-actions">
             <button type="submit" className="primary" disabled={submitting}>
               {submitting ? t.common.recording : t.payments.submit}
