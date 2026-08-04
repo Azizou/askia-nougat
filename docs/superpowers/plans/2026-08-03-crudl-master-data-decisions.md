@@ -142,9 +142,18 @@ was payments, and unlike the sales and purchases forms the payments form has no
 auto-selection — but it did list both seeded parties in its dropdown, so the path was
 reachable by an ordinary click rather than only by import.
 
-`handle_payment_allocated` needs no guard: it requires an existing payment owned by the
-party, which is now unreachable, and `check_credit_overdraw` independently refuses an
-allocation against a zero credit balance.
+`handle_payment_allocated` is deliberately left **unguarded**, and my first reasoning for
+that was wrong in a way worth recording. I argued it was unreachable because it needs an
+existing payment owned by the party. It is not unreachable: `import_jsonl` calls
+`insert_raw_event` then `rebuild`, so it never runs command guards at all — that is the D4
+design, not a hole. A log written by a device on an older build can therefore carry both a
+credit sale to the walk-in customer and a prepayment from it.
+
+In exactly that scenario, allocating the imported prepayment against the imported invoice is
+the *remediation*: it draws the phantom credit down and reduces the bad balance to zero.
+Guarding it would strand a user with legacy data, holding a balance they cannot clear through
+the UI. So the guard belongs on the two commands that create the bad state and not on the one
+that resolves it. `check_credit_overdraw` still bounds it to the credit actually held.
 
 Checked against the user's real 242-event ledger before adding the guard: it contains no
 credit sale to the walk-in customer, no credit purchase from the anonymous supplier, no

@@ -267,4 +267,81 @@ mod tests {
                 .expect("ordinary parties are unaffected");
         }
     }
+
+    /// The guard above is a command guard, so a log imported from a device on an
+    /// older build can still carry a credit sale to a seeded party and a prepayment
+    /// from it — `import_jsonl` appends raw and rebuilds, which is the D4 design.
+    ///
+    /// Two things must hold for such a log. It must still replay, or the guard would
+    /// brick startup for exactly the users it was meant to protect. And the phantom
+    /// balance must remain clearable, which is why `handle_payment_allocated` is
+    /// deliberately left unguarded: allocating the stray prepayment against the stray
+    /// invoice is the remediation, not a repeat of the mistake.
+    #[test]
+    fn an_imported_legacy_seeded_party_balance_replays_and_stays_clearable() {
+        let (mut conn, mut hlc) = fixture();
+        seed_credit_sale(&mut conn, &mut hlc);
+        crate::genesis::ensure_walkin_party(&conn, &mut hlc, 1000, "deviceA").unwrap();
+        crate::projectors::rebuild(&mut conn).unwrap();
+        let walkin = crate::genesis::WALKIN_PARTY_ID;
+
+        // Appended the way an import does it: no guard in the path.
+        append_raw(&mut conn, &mut hlc, "SaleRecorded", json!({
+            "saleId": "legacy_sale", "customerId": walkin, "date": "2026-02-01",
+            "terms": "credit", "totalMinor": 3000,
+            "lines": [{"itemId": "itemA", "qty": 3, "unitPriceMinor": 1000,
+                       "revenueMinor": 3000, "cogsMinor": 300,
+                       "lotConsumption": [{"lotId": "pur1#lot0", "qtyTaken": 3,
+                                           "unitCostMinor": 100}]}],
+        }));
+        append_raw(&mut conn, &mut hlc, "PaymentReceived", json!({
+            "paymentId": "legacy_prepay", "customerId": walkin,
+            "amountMinor": 3000, "date": "2026-02-02", "allocations": [],
+        }));
+
+        // Must replay rather than panic, and the legacy balance must survive intact.
+        crate::projectors::rebuild(&mut conn).expect("an imported legacy log must still replay");
+        let (recv, cr): (i64, i64) = conn.query_row(
+            "SELECT receivable_minor, unallocated_cr_minor FROM party_balances WHERE party_id = ?1",
+            [walkin], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((recv, cr), (3000, 3000));
+
+        // Remediation must remain available through the UI.
+        {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_payment_allocated(&mut c, "alloc1", "legacy_prepay", walkin, "2026-03-01",
+                vec![AllocInput{ target_id:"legacy_sale".into(), target_type:"sale".into(),
+                                 amount_minor:3000 }])
+                .expect("clearing an imported phantom balance must stay possible");
+        }
+        let (recv2, cr2): (i64, i64) = conn.query_row(
+            "SELECT receivable_minor, unallocated_cr_minor FROM party_balances WHERE party_id = ?1",
+            [walkin], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        let out: i64 = conn.query_row(
+            "SELECT outstanding_minor FROM sales WHERE id='legacy_sale'", [], |r| r.get(0)).unwrap();
+        assert_eq!((recv2, cr2, out), (0, 0, 0), "the phantom balance must clear completely");
+    }
+
+    /// Appends an event exactly as `import_jsonl` does — straight into the log,
+    /// with no command guard in the path.
+    fn append_raw(
+        conn: &mut rusqlite::Connection, hlc: &mut crate::hlc::Hlc,
+        etype: &str, payload: serde_json::Value,
+    ) {
+        let stamp = hlc.tick(3000);
+        let seq: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE device_id = 'deviceB'",
+            [], |r| r.get(0)).unwrap();
+        let ev = crate::events::LedgerEvent {
+            id: format!("legacy-{etype}-{seq}"),
+            hlc: stamp,
+            device_id: "deviceB".into(),
+            user_id: "owner-1".into(),
+            seq,
+            event_type: etype.to_string(),
+            payload,
+            created_at: 3000,
+        };
+        crate::insert_raw_event(conn, &ev).unwrap();
+    }
 }
