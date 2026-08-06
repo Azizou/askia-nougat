@@ -11,6 +11,7 @@ interface Party {
   id: string;
   name: string;
   kind: string;
+  active: boolean;
 }
 
 interface Item {
@@ -18,6 +19,7 @@ interface Item {
   name: string;
   sku: string;
   unit: string;
+  active: boolean;
 }
 
 interface Sale {
@@ -48,7 +50,7 @@ export function Sales() {
   const [open, setOpen] = useState(false);
   const [customerId, setCustomerId] = useState("");
   const [date, setDate] = useState(today());
-  const [terms, setTerms] = useState<Terms>("credit");
+  const [terms, setTerms] = useState<Terms>("cash");
   const [lines, setLines] = useState<LineDraft[]>([emptyLine()]);
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -84,11 +86,29 @@ export function Sales() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // Cash sales default to the walk-in customer; switching to credit must drop
+  // that default, because a receivable against "Walk-in Customer" names nobody
+  // to collect from and the backend refuses it (D10).
+  //
+  // Keyed on `terms` alone, because this belongs to the *transition* between
+  // terms and not to the current selection. With `customerId` in the deps the
+  // effect re-fired on every change of the dropdown, so a user on cash who
+  // cleared it back to the placeholder had walk-in immediately re-imposed and
+  // could not get to the empty option. `setCustomerId` is called with an updater
+  // so the current value is read without becoming a dependency.
   useEffect(() => {
-    if (terms === "cash" && !customerId) setCustomerId(WALKIN_PARTY_ID);
-  }, [terms, customerId]);
+    setCustomerId((cur) => {
+      if (terms === "cash") return cur || WALKIN_PARTY_ID;
+      // A named customer stays selected when switching to credit; only the
+      // walk-in default is dropped.
+      return cur === WALKIN_PARTY_ID ? "" : cur;
+    });
+  }, [terms]);
 
-  const customers = parties.filter((p) => p.kind === "customer" || p.kind === "both");
+  // Archived master data stays visible in history but must not be offered for
+  // new transactions.
+  const customers = parties.filter((p) => p.active && (p.kind === "customer" || p.kind === "both"));
+  const activeItems = items.filter((i) => i.active);
 
   const updateLine = (idx: number, patch: Partial<LineDraft>) => {
     setLines((ls) => ls.map((l, i) => (i === idx ? { ...l, ...patch } : l)));
@@ -116,9 +136,12 @@ export function Sales() {
           lines: parsed,
         },
       });
-      setCustomerId("");
+      // Reset to the cash default explicitly. The terms effect keys on `terms`
+      // alone, so it does not re-fire when terms were already "cash" and cannot
+      // restore the default for us.
+      setCustomerId(WALKIN_PARTY_ID);
       setDate(today());
-      setTerms("credit");
+      setTerms("cash");
       setLines([emptyLine()]);
       setOpen(false);
       toast.push(t.sales.added);
@@ -222,7 +245,7 @@ export function Sales() {
                     required
                   >
                     <option value="">{t.sales.selectItem}</option>
-                    {items.map((it) => (
+                    {activeItems.map((it) => (
                       <option key={it.id} value={it.id}>
                         {it.name} ({it.sku})
                       </option>

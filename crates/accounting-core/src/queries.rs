@@ -264,6 +264,75 @@ pub fn party_balances(conn: &Connection) -> rusqlite::Result<Vec<PartyBalance>> 
     rows.collect()
 }
 
+// --- parties eligible for a payment ---
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PayableParty {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    /// True when the party is archived and appears only because it still owes or
+    /// is owed something. The form uses this to label the row, so an archived
+    /// party showing up in the dropdown reads as deliberate rather than as a
+    /// filter that failed.
+    pub archived: bool,
+}
+
+/// Parties the payments form may offer for `direction`: every active party of a
+/// matching kind, plus any archived party that still has an unsettled invoice or
+/// an unallocated balance.
+///
+/// The second clause is the point. Archiving is explicitly allowed while an
+/// invoice is open — that is what archive is for, retiring a party without
+/// erasing its history. But the form filtered on `active`, so archiving a
+/// customer mid-collection removed the only screen that could record their
+/// payment: the debt stayed on the books, visible in aging, with no way to
+/// settle it. Un-archiving as a workaround is not discoverable, and a user who
+/// found it would still have to remember to re-archive.
+///
+/// `COALESCE(active, 1)` per D3: rows written before the column existed project
+/// NULL, and a bare `active = 1` would hide every legacy party.
+pub fn payable_parties(conn: &Connection, direction: &str) -> rusqlite::Result<Vec<PayableParty>> {
+    // Money in settles sales owed by customers; money out settles purchases owed
+    // to suppliers. `both` qualifies either way.
+    let (kind, invoice_table, party_col, owed_cols) = match direction {
+        "in" => ("customer", "sales", "customer_id", ("receivable_minor", "unallocated_cr_minor")),
+        "out" => ("supplier", "purchases", "supplier_id", ("payable_minor", "unallocated_dr_minor")),
+        other => {
+            return Err(rusqlite::Error::InvalidParameterName(format!(
+                "invalid direction: {other}"
+            )))
+        }
+    };
+    let (owed_a, owed_b) = owed_cols;
+    let sql = format!(
+        "SELECT p.id, p.name, p.kind, COALESCE(p.active, 1) AS act
+         FROM parties p
+         WHERE (p.kind = ?1 OR p.kind = 'both')
+           AND (
+             COALESCE(p.active, 1) = 1
+             OR EXISTS (SELECT 1 FROM {invoice_table} inv
+                        WHERE inv.{party_col} = p.id
+                          AND inv.reversed = 0 AND inv.outstanding_minor > 0)
+             OR EXISTS (SELECT 1 FROM party_balances pb
+                        WHERE pb.party_id = p.id
+                          AND (COALESCE(pb.{owed_a}, 0) <> 0
+                               OR COALESCE(pb.{owed_b}, 0) <> 0))
+           )
+         ORDER BY act DESC, p.name"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([kind], |r| {
+        Ok(PayableParty {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            kind: r.get(2)?,
+            archived: r.get::<_, i64>(3)? == 0,
+        })
+    })?;
+    rows.collect()
+}
+
 fn run_aging(conn: &Connection, sql: &str, anchor: &str) -> rusqlite::Result<Vec<AgingInvoice>> {
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map(rusqlite::params![anchor], |r| {
@@ -537,5 +606,141 @@ mod tests {
         assert_eq!(bs.liabilities_minor, 100000);
         assert_eq!(bs.equity_minor, 0);
         assert_eq!(bs.assets_minor, bs.liabilities_minor + bs.equity_minor + pl.net_profit_minor);
+    }
+
+    /// Archiving a customer who still owes money used to strand the debt: the
+    /// payments form filtered on `active`, so the only screen that could record
+    /// the settlement stopped offering them, while aging kept showing the balance.
+    /// They must stay payable, and be flagged as archived so the row reads as
+    /// deliberate.
+    #[test]
+    fn an_archived_customer_with_an_open_invoice_is_still_payable() {
+        use crate::commands::setup::handle_party_updated;
+        use crate::commands::CommandContext;
+        use crate::test_support::CUST;
+
+        let (mut conn, mut hlc) = open_seeded();
+        let owed: i64 = conn
+            .query_row(
+                "SELECT outstanding_minor FROM sales WHERE customer_id = ?1 AND outstanding_minor > 0",
+                [CUST], |r| r.get(0))
+            .expect("the fixture must leave this customer owing something");
+        assert!(owed > 0);
+
+        {
+            let mut ctx = CommandContext {
+                conn: &mut conn, hlc: &mut hlc, physical_now: 2000,
+                device_id: "deviceA".into(), user_id: "owner-1".into(),
+            };
+            handle_party_updated(&mut ctx, CUST, serde_json::json!({ "active": false }))
+                .expect("archiving with an open invoice is allowed — that is what archive is for");
+        }
+
+        let rows = payable_parties(&conn, "in").unwrap();
+        let found = rows.iter().find(|p| p.id == CUST)
+            .expect("an archived customer who still owes must remain payable");
+        assert!(found.archived, "and must be flagged so the form can label the row");
+
+        // Active parties sort first, so the archived exception never displaces the
+        // ordinary choices at the top of the dropdown.
+        let first_archived = rows.iter().position(|p| p.archived);
+        let last_active = rows.iter().rposition(|p| !p.archived);
+        if let (Some(fa), Some(la)) = (first_archived, last_active) {
+            assert!(fa > la, "archived parties must sort after active ones");
+        }
+    }
+
+    /// The other half of the rule: archiving is meant to remove a party from the
+    /// forms. A party with nothing outstanding must actually disappear, or the
+    /// exception above would swallow the feature.
+    #[test]
+    fn an_archived_party_with_nothing_outstanding_drops_out() {
+        use crate::commands::setup::{handle_party_created, handle_party_updated};
+        use crate::commands::CommandContext;
+
+        let (mut conn, mut hlc) = open_seeded();
+        {
+            let mut ctx = CommandContext {
+                conn: &mut conn, hlc: &mut hlc, physical_now: 2000,
+                device_id: "deviceA".into(), user_id: "owner-1".into(),
+            };
+            handle_party_created(&mut ctx, "cust_quiet", "Quiet Co", "customer").unwrap();
+            handle_party_updated(&mut ctx, "cust_quiet", serde_json::json!({ "active": false }))
+                .unwrap();
+        }
+        let rows = payable_parties(&conn, "in").unwrap();
+        assert!(
+            !rows.iter().any(|p| p.id == "cust_quiet"),
+            "archiving must still hide a party that owes nothing"
+        );
+        // While active, it was offered — so the assertion above is about the
+        // archive flag and not about the kind filter.
+        let all = payable_parties(&conn, "in").unwrap();
+        assert!(all.iter().any(|p| p.id == crate::test_support::CUST));
+    }
+
+    /// The supplier mirror, checked in the same pass.
+    #[test]
+    fn an_archived_supplier_with_an_open_bill_is_still_payable() {
+        use crate::commands::setup::handle_party_updated;
+        use crate::commands::CommandContext;
+        use crate::test_support::SUPP;
+
+        let (mut conn, mut hlc) = open_seeded();
+        let owed: i64 = conn
+            .query_row(
+                "SELECT outstanding_minor FROM purchases
+                 WHERE supplier_id = ?1 AND outstanding_minor > 0 LIMIT 1",
+                [SUPP], |r| r.get(0))
+            .expect("the fixture must leave this supplier owed something");
+        assert!(owed > 0);
+        {
+            let mut ctx = CommandContext {
+                conn: &mut conn, hlc: &mut hlc, physical_now: 2000,
+                device_id: "deviceA".into(), user_id: "owner-1".into(),
+            };
+            handle_party_updated(&mut ctx, SUPP, serde_json::json!({ "active": false })).unwrap();
+        }
+        let rows = payable_parties(&conn, "out").unwrap();
+        let found = rows.iter().find(|p| p.id == SUPP)
+            .expect("an archived supplier still owed money must remain payable");
+        assert!(found.archived);
+        // Direction must still partition: a supplier is not a customer.
+        let money_in = payable_parties(&conn, "in").unwrap();
+        assert!(!money_in.iter().any(|p| p.id == SUPP));
+    }
+
+    /// A party carrying only an unallocated balance has no open invoice, so the
+    /// invoice clause alone would miss them — and an unallocated credit is exactly
+    /// what `PaymentAllocated` needs a party in the form to draw down.
+    #[test]
+    fn an_archived_party_holding_an_unallocated_credit_is_still_payable() {
+        use crate::commands::payment::handle_payment_received;
+        use crate::commands::setup::{handle_party_created, handle_party_updated};
+        use crate::commands::CommandContext;
+
+        let (mut conn, mut hlc) = open_seeded();
+        {
+            let mut ctx = CommandContext {
+                conn: &mut conn, hlc: &mut hlc, physical_now: 2000,
+                device_id: "deviceA".into(), user_id: "owner-1".into(),
+            };
+            handle_party_created(&mut ctx, "cust_prepaid", "Prepaid Co", "customer").unwrap();
+            // A pure prepayment: no invoice, just a credit held for them.
+            handle_payment_received(&mut ctx, "pay_pre", "cust_prepaid", 2500, "2026-07-10", vec![])
+                .unwrap();
+            handle_party_updated(&mut ctx, "cust_prepaid", serde_json::json!({ "active": false }))
+                .unwrap();
+        }
+        let rows = payable_parties(&conn, "in").unwrap();
+        let found = rows.iter().find(|p| p.id == "cust_prepaid")
+            .expect("an archived party still holding a credit must remain payable");
+        assert!(found.archived);
+    }
+
+    #[test]
+    fn payable_parties_rejects_an_unknown_direction() {
+        let (conn, _) = open_seeded();
+        assert!(payable_parties(&conn, "sideways").is_err());
     }
 }

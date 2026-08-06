@@ -83,9 +83,15 @@ fn lot_unit_cost(tx: &Connection, lot_id: &str) -> rusqlite::Result<i64> {
 
 /// Merge an event's `changes` object into an existing row's `doc` JSONB.
 fn patch_doc(tx: &Connection, table: &str, ev: &LedgerEvent, id_key: &str) -> rusqlite::Result<()> {
+    use rusqlite::OptionalExtension;
     let id = ps(&ev.payload, id_key);
     let sel = format!("SELECT json(doc) FROM {table} WHERE id = ?1");
-    let doc_text: String = tx.query_row(&sel, [id], |r| r.get(0))?;
+    // A merged log can order an update after another device's delete. The row
+    // is gone and there is nothing to patch; failing here would make the
+    // ledger unreplayable, and startup treats that as fatal.
+    let Some(doc_text) = tx.query_row(&sel, [id], |r| r.get::<_, String>(0)).optional()? else {
+        return Ok(());
+    };
     let mut doc: Value = serde_json::from_str(&doc_text).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
     })?;
@@ -94,6 +100,100 @@ fn patch_doc(tx: &Connection, table: &str, ev: &LedgerEvent, id_key: &str) -> ru
             doc[k] = v.clone();
         }
     }
+    let upd = format!("UPDATE {table} SET doc = jsonb(?2) WHERE id = ?1");
+    tx.execute(&upd, rusqlite::params![id, doc.to_string()])?;
+    Ok(())
+}
+
+/// Mark a master-data row deleted. The row is *not* removed here — see
+/// [`compact_deleted_master`], which removes it after the whole log has been
+/// applied.
+///
+/// A projector must never fail. `init_state` calls
+/// `rebuild(...).expect("rebuild projections")`, so an event that cannot be
+/// applied does not surface as an error message — it makes the app impossible
+/// to launch, permanently, because the event is immutable in the log.
+///
+/// Deleting here cannot be made safe by counting references first, and this is
+/// the subtle part. `count_references` reads the read model *as it stands at
+/// this point in the stream*, but a merged log (see `import_jsonl`) can place
+/// this delete before a sale from another device that uses the row. The count is
+/// then legitimately zero, the DELETE succeeds, and the foreign key fails later
+/// inside the referencing INSERT — which this function does not control.
+/// Mid-replay a reference count is not a fact about the ledger; it is an
+/// artifact of position in the stream, so no amount of checking here fixes it.
+///
+/// Hence: mark, never delete. Deferring costs one flag and makes the projector
+/// total in both orderings, which is the property that matters.
+fn delete_master(
+    tx: &Connection,
+    table: &str,
+    ev: &LedgerEvent,
+    id_key: &str,
+) -> rusqlite::Result<()> {
+    let id = ps(&ev.payload, id_key);
+    // Archived too, so the row stays out of every new-transaction dropdown even
+    // if it turns out to be referenced and survives compaction.
+    set_active(tx, table, id, false)?;
+    set_doc_flag(tx, table, id, DELETED_FLAG, true)
+}
+
+/// Marks a row as deleted-pending-compaction inside its JSON doc.
+const DELETED_FLAG: &str = "deleted";
+
+/// Remove every row marked by [`delete_master`] that nothing references, now
+/// that the projection is complete and a reference count finally means what it
+/// says. A row that *is* referenced stays as an archived tombstone: the delete
+/// loses to the transaction that needs it, which is the outcome that keeps
+/// history intact.
+///
+/// Runs inside the same transaction as the replay, so the projection is never
+/// observable in the intermediate state.
+pub fn compact_deleted_master(tx: &Connection) -> rusqlite::Result<()> {
+    for (table, refs) in [
+        ("items", crate::refs::ITEM_REFS),
+        ("parties", crate::refs::PARTY_REFS),
+    ] {
+        // `json_extract` unwraps a JSON boolean to integer 1/0, not to json('true').
+        let sel = format!("SELECT id FROM {table} WHERE json_extract(doc, '$.{DELETED_FLAG}') = 1");
+        let ids: Vec<String> = {
+            let mut stmt = tx.prepare(&sel)?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for id in ids {
+            if crate::refs::count_references(tx, refs, &id)? == 0 {
+                tx.execute(&format!("DELETE FROM {table} WHERE id = ?1"), [&id])?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Set a boolean flag inside a master-data row's JSON doc. A missing row is a
+/// no-op, for the reasons in [`delete_master`].
+fn set_doc_flag(tx: &Connection, table: &str, id: &str, key: &str, value: bool)
+-> rusqlite::Result<()> {
+    let upd = format!(
+        "UPDATE {table} SET doc = jsonb(json_set(json(doc), '$.' || ?2, json(?3))) WHERE id = ?1"
+    );
+    tx.execute(&upd, rusqlite::params![id, key, if value { "true" } else { "false" }])?;
+    Ok(())
+}
+
+/// Set `active` inside a master-data row's JSON doc, leaving every other field
+/// alone. A missing row is a no-op, not an error, for the reasons in
+/// [`delete_master`].
+fn set_active(tx: &Connection, table: &str, id: &str, active: bool) -> rusqlite::Result<()> {
+    use rusqlite::OptionalExtension;
+    let sel = format!("SELECT json(doc) FROM {table} WHERE id = ?1");
+    let Some(doc_text) = tx.query_row(&sel, [id], |r| r.get::<_, String>(0)).optional()? else {
+        return Ok(());
+    };
+    let mut doc: Value = serde_json::from_str(&doc_text).map_err(|e| {
+        rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+    })?;
+    doc["active"] = json!(active);
     let upd = format!("UPDATE {table} SET doc = jsonb(?2) WHERE id = ?1");
     tx.execute(&upd, rusqlite::params![id, doc.to_string()])?;
     Ok(())
@@ -141,6 +241,10 @@ pub fn apply_event(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
         "AccountUpdated" => patch_doc(tx, "accounts", ev, "accountId"),
         "ItemUpdated" => patch_doc(tx, "items", ev, "itemId"),
         "PartyUpdated" => patch_doc(tx, "parties", ev, "partyId"),
+
+        // ---- master data: delete (hard, or archive when contested) ----
+        "ItemDeleted" => delete_master(tx, "items", ev, "itemId"),
+        "PartyDeleted" => delete_master(tx, "parties", ev, "partyId"),
 
         "PurchaseRecorded" => purchase_recorded(tx, ev),
         "SaleRecorded" => sale_recorded(tx, ev),
@@ -538,13 +642,22 @@ fn sale_return(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
         rusqlite::params![return_id, revenue_reversed, cost_restored],
     )?;
 
-    let customer: Option<String> = tx.query_row(
-        "SELECT customer_id FROM sales WHERE id = ?1", [original_id], |r| r.get(0))?;
+    // A cash sale also stores its `customer_id` — the walk-in party for an
+    // anonymous counter sale, a named one when the customer is known but paid on
+    // the spot. So the presence of a customer says nothing about how the refund
+    // must be settled; only the terms do. Gating on the customer refunded every
+    // cash return to Accounts Receivable and credited the customer an
+    // unallocated credit they were never owed, since a cash sale has
+    // `outstanding_minor = 0` and the whole amount fell through as excess.
+    let credit_customer: Option<String> = tx.query_row(
+        "SELECT CASE WHEN terms = 'credit' THEN customer_id END FROM sales WHERE id = ?1",
+        [original_id], |r| r.get(0))?;
 
     let sales_acct = account_id_by_role(tx, "sales")?;
     let inventory = account_id_by_role(tx, "inventory")?;
     let cogs = account_id_by_role(tx, "cogs")?;
-    let refund_acct = if customer.is_some() {
+    // Credit sale: cancel what they owe. Cash sale: money goes back out the till.
+    let refund_acct = if credit_customer.is_some() {
         account_id_by_role(tx, "accounts_receivable")?
     } else {
         account_id_by_role(tx, "bank")?
@@ -554,7 +667,7 @@ fn sale_return(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
     post_line(tx, &ev.id, return_id, 2, &inventory, cost_restored, 0, date, None)?;
     post_line(tx, &ev.id, return_id, 3, &cogs, 0, cost_restored, date, None)?;
 
-    if let Some(c) = customer {
+    if let Some(c) = credit_customer {
         let outstanding: i64 = tx.query_row(
             "SELECT outstanding_minor FROM sales WHERE id = ?1", [original_id], |r| r.get(0))?;
         let reduce = revenue_reversed.min(outstanding.max(0));
@@ -598,11 +711,14 @@ fn purchase_return(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
         rusqlite::params![return_id, cost_restored],
     )?;
 
-    let supplier: Option<String> = tx.query_row(
-        "SELECT supplier_id FROM purchases WHERE id = ?1", [original_id], |r| r.get(0))?;
+    // The mirror of the cash-sale case in `sale_return`: a cash purchase stores
+    // its `supplier_id` too, so only the terms decide how the refund settles.
+    let credit_supplier: Option<String> = tx.query_row(
+        "SELECT CASE WHEN terms = 'credit' THEN supplier_id END FROM purchases WHERE id = ?1",
+        [original_id], |r| r.get(0))?;
 
     let inventory = account_id_by_role(tx, "inventory")?;
-    let refund_acct = if supplier.is_some() {
+    let refund_acct = if credit_supplier.is_some() {
         account_id_by_role(tx, "accounts_payable")?
     } else {
         account_id_by_role(tx, "bank")?
@@ -610,7 +726,7 @@ fn purchase_return(tx: &Connection, ev: &LedgerEvent) -> rusqlite::Result<()> {
     post_line(tx, &ev.id, return_id, 0, &refund_acct, cost_restored, 0, date, None)?;
     post_line(tx, &ev.id, return_id, 1, &inventory, 0, cost_restored, date, None)?;
 
-    if let Some(s) = supplier {
+    if let Some(s) = credit_supplier {
         let outstanding: i64 = tx.query_row(
             "SELECT outstanding_minor FROM purchases WHERE id = ?1", [original_id], |r| r.get(0))?;
         let reduce = cost_restored.min(outstanding.max(0));
@@ -778,6 +894,9 @@ pub fn rebuild(conn: &mut Connection) -> rusqlite::Result<()> {
         apply_event(&tx, ev)?;
         last_hlc = ev.hlc.clone();
     }
+    // Only now is a reference count a fact about the ledger rather than an
+    // artifact of position in the stream. See `delete_master`.
+    compact_deleted_master(&tx)?;
     if !last_hlc.is_empty() {
         tx.execute(
             "INSERT INTO projection_cursor (projection, last_hlc) VALUES ('main', ?1)
@@ -796,6 +915,8 @@ mod tests {
     use crate::events::append_event;
     use crate::hlc::Hlc;
 
+    /// Mirrors `commit_event`: append and project, WITHOUT compacting. Compaction is
+    /// deliberately not part of the per-event path — see `compact_deleted_master`.
     fn record(conn: &mut Connection, hlc: &mut Hlc, phys: u64, ty: &str, payload: Value) -> LedgerEvent {
         let tx = conn.transaction().unwrap();
         let ev = append_event(&tx, hlc, phys, "devA", "userX", ty, &payload).unwrap();
@@ -1333,5 +1454,159 @@ mod tests {
         assert_eq!((sales, lots), (2, 1));
         let reversed: i64 = conn.query_row("SELECT reversed FROM sales WHERE id='so2'", [], |r| r.get(0)).unwrap();
         assert_eq!(reversed, 1);
+    }
+
+    #[test]
+    fn item_deleted_marks_the_row_and_compaction_removes_it() {
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("devA");
+        record(&mut conn, &mut hlc, 1000, "ItemDefined",
+            json!({"itemId": "i1", "sku": "S1", "name": "W", "unit": "ea"}));
+        record(&mut conn, &mut hlc, 1000, "ItemDeleted", json!({"itemId": "i1"}));
+        // Mid-replay the row is only marked — deleting here is what bricks a merged log.
+        let (n, active): (i64, Option<i64>) = conn.query_row(
+            "SELECT COUNT(*), MAX(active) FROM items WHERE id = 'i1'", [],
+            |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(n, 1, "the row survives until compaction");
+        assert_eq!(active, Some(0), "and is archived meanwhile, so no form offers it");
+        // Compaction is where an unreferenced row actually goes away.
+        rebuild(&mut conn).expect("replay must stay total");
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "nothing references it, so compaction removes it");
+    }
+
+    #[test]
+    fn party_deleted_marks_the_row_and_compaction_removes_it() {
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("devA");
+        record(&mut conn, &mut hlc, 1000, "PartyCreated",
+            json!({"partyId": "p1", "name": "Acme", "kind": "supplier"}));
+        record(&mut conn, &mut hlc, 1000, "PartyDeleted", json!({"partyId": "p1"}));
+        let (n, active): (i64, Option<i64>) = conn.query_row(
+            "SELECT COUNT(*), MAX(active) FROM parties WHERE id = 'p1'", [],
+            |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(n, 1, "the row survives until compaction");
+        assert_eq!(active, Some(0));
+        rebuild(&mut conn).expect("replay must stay total");
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM parties", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 0, "nothing references it, so compaction removes it");
+    }
+
+    #[test]
+    fn a_delete_arriving_after_the_purchase_that_uses_the_item_keeps_the_row() {
+        // NOTE ON THE NAME: this covers the delete arriving AFTER the reference.
+        // It was previously named for the opposite ordering, which it never
+        // exercised; that ordering is covered by
+        // `a_delete_applied_before_the_transaction_that_needs_the_item_stays_replayable`.
+        //
+        // Here the item is already referenced when the delete lands, so
+        // compaction must leave the row in place as an archived tombstone rather
+        // than orphan purchase_lines.
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("devA");
+        seed_accounts(&mut conn, &mut hlc);
+        record(&mut conn, &mut hlc, 1000, "ItemDefined",
+            json!({"itemId": "i1", "sku": "S1", "name": "W", "unit": "ea"}));
+        record(&mut conn, &mut hlc, 1000, "PurchaseRecorded",
+            json!({"purchaseId": "po1", "supplierId": null, "date": "2026-01-01", "terms": "cash",
+                   "lines": [{"itemId": "i1", "qty": 10, "unitCostMinor": 100, "lotId": "lot1"}]}));
+
+        // The purchase already references the item, standing in for "a
+        // transaction the deleting device had not seen".
+        record(&mut conn, &mut hlc, 2000, "ItemDeleted", json!({"itemId": "i1"}));
+
+        let (rows, active): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(active) FROM items WHERE id = 'i1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(rows, 1, "the row must survive so its transactions stay valid");
+        assert_eq!(active, Some(0), "and it must be archived rather than deleted");
+
+        // The whole log must still replay from scratch.
+        rebuild(&mut conn).expect("a merged log containing a contested delete must stay replayable");
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM items WHERE id = 'i1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+    }
+
+    /// The ordering that actually hurts, and the one the test above does NOT cover
+    /// despite its name: the delete is applied FIRST, before the referencing
+    /// transaction arrives.
+    ///
+    /// `count_references` reads the read model as it stands mid-replay, so at that
+    /// moment the count is legitimately zero and the hard DELETE proceeds. The
+    /// foreign key then fails inside the LATER insert, which `delete_master` does
+    /// not control. Mid-replay a reference count is not a fact about the ledger,
+    /// it is an artifact of position in the stream.
+    #[test]
+    fn a_delete_applied_before_the_transaction_that_needs_the_item_stays_replayable() {
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("devA");
+        seed_accounts(&mut conn, &mut hlc);
+        record(&mut conn, &mut hlc, 1000, "ItemDefined",
+            json!({"itemId": "i1", "sku": "S1", "name": "W", "unit": "ea"}));
+        // Device A deletes an item it never traded. The guard rightly permits this.
+        record(&mut conn, &mut hlc, 1000, "ItemDeleted", json!({"itemId": "i1"}));
+        // Device B had already sold it, and its event sorts later.
+        record(&mut conn, &mut hlc, 2000, "PurchaseRecorded",
+            json!({"purchaseId": "po1", "supplierId": null, "date": "2026-01-01", "terms": "cash",
+                   "lines": [{"itemId": "i1", "qty": 10, "unitCostMinor": 100, "lotId": "lot1"}]}));
+
+        rebuild(&mut conn).expect("a merged log must stay replayable in EITHER order");
+    }
+
+    /// The party mirror. `adjust_party_balance` uses `INSERT OR IGNORE`, which
+    /// suppresses uniqueness conflicts only — never a foreign-key violation — so
+    /// this aborts the rebuild just as the item path does.
+    #[test]
+    fn a_delete_applied_before_the_transaction_that_needs_the_party_stays_replayable() {
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("devA");
+        seed_accounts(&mut conn, &mut hlc);
+        record(&mut conn, &mut hlc, 1000, "ItemDefined",
+            json!({"itemId": "i1", "sku": "S1", "name": "W", "unit": "ea"}));
+        record(&mut conn, &mut hlc, 1000, "PartyCreated",
+            json!({"partyId": "p1", "name": "Acme", "kind": "customer"}));
+        record(&mut conn, &mut hlc, 1000, "PartyDeleted", json!({"partyId": "p1"}));
+        // A credit sale reaches adjust_party_balance, which writes party_balances.
+        record(&mut conn, &mut hlc, 2000, "PurchaseRecorded",
+            json!({"purchaseId": "po1", "supplierId": null, "date": "2026-01-01", "terms": "cash",
+                   "lines": [{"itemId": "i1", "qty": 10, "unitCostMinor": 100, "lotId": "lot1"}]}));
+        record(&mut conn, &mut hlc, 2100, "SaleRecorded",
+            json!({"saleId": "s1", "customerId": "p1", "date": "2026-02-01", "terms": "credit",
+                   "totalMinor": 3000,
+                   "lines": [{"itemId": "i1", "qty": 3, "unitPriceMinor": 1000,
+                              "revenueMinor": 3000, "cogsMinor": 300,
+                              "lotConsumption": [{"lotId": "lot1", "qtyTaken": 3,
+                                                  "unitCostMinor": 100}]}]}));
+
+        rebuild(&mut conn).expect("a merged log must stay replayable in EITHER order");
+    }
+
+    #[test]
+    fn a_delete_of_a_row_that_is_already_gone_is_a_no_op() {
+        // Two devices can both delete the same unused item. The second event
+        // must not fail; it has nothing left to do.
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("devA");
+        record(&mut conn, &mut hlc, 1000, "ItemDefined",
+            json!({"itemId": "i1", "sku": "S1", "name": "W", "unit": "ea"}));
+        record(&mut conn, &mut hlc, 1000, "ItemDeleted", json!({"itemId": "i1"}));
+        record(&mut conn, &mut hlc, 1100, "ItemDeleted", json!({"itemId": "i1"}));
+        rebuild(&mut conn).expect("a duplicated delete must stay replayable");
+    }
+
+    #[test]
+    fn an_update_arriving_after_a_delete_is_a_no_op() {
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("devA");
+        record(&mut conn, &mut hlc, 1000, "PartyCreated",
+            json!({"partyId": "p1", "name": "Acme", "kind": "supplier"}));
+        record(&mut conn, &mut hlc, 1000, "PartyDeleted", json!({"partyId": "p1"}));
+        record(&mut conn, &mut hlc, 1100, "PartyUpdated",
+            json!({"partyId": "p1", "changes": {"name": "Acme Renamed"}}));
+        rebuild(&mut conn).expect("an update after a delete must stay replayable");
     }
 }

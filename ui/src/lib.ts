@@ -3,14 +3,22 @@ export interface Currency {
   decimals: number;
 }
 
-// Stable ID of the seeded shared cash-sale party (see genesis.rs). Its stored
-// name is a fixed English string, so the UI translates it by ID at display time.
+// Stable IDs of the seeded shared parties (see genesis.rs). Their stored names
+// are fixed English strings, so the UI translates them by ID at display time.
 export const WALKIN_PARTY_ID = "party_walkin";
+export const ANON_SUPPLIER_PARTY_ID = "party_anon_supplier";
 
-// Display name for a party: the seeded walk-in party is localized via the
-// supplied label; every other party shows its stored name.
-export function displayPartyName(id: string, storedName: string, walkinLabel: string): string {
-  return id === WALKIN_PARTY_ID ? walkinLabel : storedName;
+// Display name for a party: the two seeded parties are localized via the
+// supplied labels; every other party shows its stored name.
+export function displayPartyName(
+  id: string,
+  storedName: string,
+  walkinLabel: string,
+  anonSupplierLabel?: string,
+): string {
+  if (id === WALKIN_PARTY_ID) return walkinLabel;
+  if (id === ANON_SUPPLIER_PARTY_ID && anonSupplierLabel) return anonSupplierLabel;
+  return storedName;
 }
 
 export function formatMoney(minor: number, currency?: Currency, locale?: string): string {

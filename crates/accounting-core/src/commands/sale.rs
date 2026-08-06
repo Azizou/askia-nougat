@@ -1,6 +1,6 @@
 use crate::commands::guards::{check_amount_non_negative, check_at_least_one_line,
     check_lot_item_match, check_qty_positive, check_sale_return_over_restore,
-    check_invoice_not_reversed, LotDemand};
+    check_invoice_not_reversed, check_seeded_party_cash_only, LotDemand};
 use crate::commands::{commit_event, reject, CommandContext, CommandError};
 use rusqlite::OptionalExtension;
 use serde_json::json;
@@ -55,6 +55,7 @@ pub fn handle_sale_recorded(
 ) -> Result<crate::events::LedgerEvent, CommandError> {
     check_at_least_one_line(&lines)?;
     if !matches!(terms, "cash"|"credit") { return Err(reject(format!("invalid terms: {terms}"))); }
+    check_seeded_party_cash_only(customer_id, terms)?;
     {
         let kind: Option<String> = ctx.conn.query_row(
             "SELECT kind FROM parties WHERE id = ?1", [customer_id], |r| r.get(0)).optional()?;
@@ -388,5 +389,35 @@ mod tests {
                     lot_returns: vec![("purOld#lot0".into(), 2)] }]).unwrap_err()
         };
         assert!(matches!(err, CommandError::Validation(_)));
+    }
+
+    #[test]
+    fn credit_sale_to_the_walkin_customer_is_rejected() {
+        let (mut conn, mut hlc) = fixture();
+        seed(&mut conn, &mut hlc);
+        crate::genesis::ensure_walkin_party(&conn, &mut hlc, 1000, "deviceA").unwrap();
+        crate::projectors::rebuild(&mut conn).unwrap();
+
+        // Cash is the whole purpose of the walk-in party and must still work.
+        {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_sale_recorded(&mut c, "sale_cash", crate::genesis::WALKIN_PARTY_ID,
+                "2026-03-01", "cash",
+                vec![SaleLineInput{ item_id:"itemA".into(), qty:2, unit_price_minor:1000,
+                    lot_picks: None }]).expect("cash sale to walk-in must be allowed");
+        }
+        // Credit would book a receivable against a party that names nobody.
+        let err = {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_sale_recorded(&mut c, "sale_credit", crate::genesis::WALKIN_PARTY_ID,
+                "2026-03-01", "credit",
+                vec![SaleLineInput{ item_id:"itemA".into(), qty:2, unit_price_minor:1000,
+                    lot_picks: None }]).unwrap_err()
+        };
+        assert!(matches!(err, CommandError::Validation(_)));
+        let recv: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(receivable_minor), 0) FROM party_balances WHERE party_id = ?1",
+            [crate::genesis::WALKIN_PARTY_ID], |r| r.get(0)).unwrap();
+        assert_eq!(recv, 0, "the walk-in customer must never carry a receivable");
     }
 }

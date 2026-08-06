@@ -10,6 +10,10 @@ pub const SYSTEM_USER_ID: &str = "system";
 /// walk-in buyers.
 pub const WALKIN_PARTY_ID: &str = "party_walkin";
 
+/// The shared, always-present supplier used to record cash purchases from an
+/// unrecorded seller — the buy-side counterpart of [`WALKIN_PARTY_ID`].
+pub const ANON_SUPPLIER_PARTY_ID: &str = "party_anon_supplier";
+
 /// Seeded chart of accounts: (system_role, display name, type, normal side).
 const SEEDED_ACCOUNTS: &[(&str, &str, &str, &str)] = &[
     ("cash",                "Cash",                     "asset",     "debit"),
@@ -91,7 +95,47 @@ pub fn ensure_walkin_party(
     append_event(
         conn, hlc, physical_now, device_id, SYSTEM_USER_ID,
         "PartyCreated",
-        &json!({ "partyId": WALKIN_PARTY_ID, "name": "Walk-in Customer", "kind": "customer" }),
+        // `active` is stated explicitly, matching `ensure_anon_supplier`. Omitting
+        // it projected `active = NULL`, which every SQL read path absorbs via
+        // `COALESCE(active, 1)` (D3) but which the frontend would treat as falsy
+        // if a query ever returned the raw column — and `p.active` in the sales
+        // form is a truthiness test, so the walk-in party would vanish from the
+        // dropdown the cash default depends on.
+        //
+        // This reaches fresh installs only: the seed is guarded on the log, so an
+        // install that already emitted this event keeps the payload it has,
+        // forever. D3's null-safety is what protects those, not this line.
+        &json!({ "partyId": WALKIN_PARTY_ID, "name": "Walk-in Customer",
+                 "kind": "customer", "active": true }),
+    )?;
+    Ok(())
+}
+
+/// Idempotently ensure the anonymous cash supplier exists.
+///
+/// The mirror of [`ensure_walkin_party`], and safe on every startup for the
+/// same reason: it consults the immutable event log rather than the `parties`
+/// projection, which is empty until `rebuild()` runs. Covers installs whose
+/// genesis predates this party.
+pub fn ensure_anon_supplier(
+    conn: &Connection,
+    hlc: &mut Hlc,
+    physical_now: u64,
+    device_id: &str,
+) -> rusqlite::Result<()> {
+    let exists: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM events WHERE type = 'PartyCreated' \
+         AND json_extract(payload, '$.partyId') = ?1",
+        [ANON_SUPPLIER_PARTY_ID],
+        |r| r.get(0),
+    )?;
+    if exists > 0 {
+        return Ok(());
+    }
+    append_event(
+        conn, hlc, physical_now, device_id, SYSTEM_USER_ID,
+        "PartyCreated",
+        &json!({ "partyId": ANON_SUPPLIER_PARTY_ID, "name": "Cash Supplier", "kind": "supplier", "active": true }),
     )?;
     Ok(())
 }
@@ -173,15 +217,92 @@ mod tests {
     }
 
     #[test]
+    fn ensure_anon_supplier_seeds_once_and_is_idempotent() {
+        let conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("deviceA");
+        run_genesis(&conn, &mut hlc, 1000, "deviceA", "owner-1", "Jane").unwrap();
+
+        ensure_anon_supplier(&conn, &mut hlc, 2000, "deviceA").unwrap();
+        ensure_anon_supplier(&conn, &mut hlc, 3000, "deviceA").unwrap();
+
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE type='PartyCreated' \
+                 AND json_extract(payload, '$.partyId') = ?1",
+                [ANON_SUPPLIER_PARTY_ID],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "the anonymous supplier must be seeded exactly once");
+    }
+
+    #[test]
+    fn ensure_anon_supplier_projects_a_supplier_party() {
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("deviceA");
+        run_genesis(&conn, &mut hlc, 1000, "deviceA", "owner-1", "Jane").unwrap();
+        ensure_anon_supplier(&conn, &mut hlc, 2000, "deviceA").unwrap();
+        crate::projectors::rebuild(&mut conn).unwrap();
+        let (kind, active): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT kind, active FROM parties WHERE id = ?1",
+                [ANON_SUPPLIER_PARTY_ID],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        // `handle_purchase_recorded` calls ensure_party(.., &["supplier"]),
+        // so the kind must be exactly this.
+        assert_eq!(kind, "supplier");
+        assert_eq!(active, Some(1), "it must be visible in supplier dropdowns");
+    }
+
+    #[test]
+    fn the_two_seeded_parties_are_distinct() {
+        assert_ne!(WALKIN_PARTY_ID, ANON_SUPPLIER_PARTY_ID);
+    }
+
+    #[test]
     fn ensure_walkin_projects_a_customer_party() {
         let mut conn = open_in_memory_with_schema().unwrap();
         let mut hlc = Hlc::new("deviceA");
         run_genesis(&conn, &mut hlc, 1000, "deviceA", "owner-1", "Jane").unwrap();
         ensure_walkin_party(&conn, &mut hlc, 2000, "deviceA").unwrap();
         crate::projectors::rebuild(&mut conn).unwrap();
-        let kind: String = conn
-            .query_row("SELECT kind FROM parties WHERE id = ?1", [WALKIN_PARTY_ID], |r| r.get(0))
+        let (kind, active): (String, Option<i64>) = conn
+            .query_row(
+                "SELECT kind, active FROM parties WHERE id = ?1",
+                [WALKIN_PARTY_ID],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
             .unwrap();
         assert_eq!(kind, "customer");
+        // Asserted for the same reason as the anon-supplier mirror: the sales form
+        // filters on `p.active`, which is a JS truthiness test, so a NULL here
+        // would drop the walk-in party from the dropdown that the cash default
+        // auto-selects.
+        assert_eq!(active, Some(1), "it must be visible in customer dropdowns");
+    }
+
+    /// Both seeds must state `active` — a difference between them is the drift
+    /// that let the walk-in payload go without it while its mirror had it.
+    #[test]
+    fn both_seeded_parties_state_active_explicitly() {
+        let conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("deviceA");
+        run_genesis(&conn, &mut hlc, 1000, "deviceA", "owner-1", "Jane").unwrap();
+        ensure_walkin_party(&conn, &mut hlc, 2000, "deviceA").unwrap();
+        ensure_anon_supplier(&conn, &mut hlc, 2000, "deviceA").unwrap();
+        for id in [WALKIN_PARTY_ID, ANON_SUPPLIER_PARTY_ID] {
+            let raw: Option<i64> = conn
+                .query_row(
+                    "SELECT json_extract(payload, '$.active') FROM events
+                     WHERE type = 'PartyCreated'
+                       AND json_extract(payload, '$.partyId') = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(raw, Some(1), "{id} must seed with an explicit active flag");
+        }
     }
 }

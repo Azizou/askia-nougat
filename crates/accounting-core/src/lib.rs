@@ -8,18 +8,23 @@ pub mod reconciliation;
 pub mod queries;
 pub mod settings;
 pub mod archive;
+mod refs;
 #[cfg(test)]
 mod test_support;
 
 pub use db::{apply_schema, open_in_memory, open_in_memory_with_schema};
 pub use hlc::{rehydrate_from_log, Hlc};
 pub use events::{append_event, insert_raw_event, missing_seqs, read_events, LedgerEvent};
-pub use genesis::{ensure_walkin_party, run_genesis, SYSTEM_USER_ID, WALKIN_PARTY_ID};
+pub use genesis::{
+    ensure_anon_supplier, ensure_walkin_party, run_genesis, ANON_SUPPLIER_PARTY_ID, SYSTEM_USER_ID,
+    WALKIN_PARTY_ID,
+};
 pub use projectors::{apply_event, rebuild};
 pub use commands::{CommandContext, CommandError};
 pub use commands::setup::{
-    handle_account_opened, handle_account_updated, handle_item_defined, handle_item_updated,
-    handle_party_created, handle_party_updated, handle_user_registered, handle_user_updated,
+    handle_account_opened, handle_account_updated, handle_item_defined, handle_item_deleted,
+    handle_item_updated, handle_party_created, handle_party_deleted, handle_party_updated,
+    handle_user_registered, handle_user_updated,
 };
 pub use commands::purchase::{handle_purchase_recorded, handle_purchase_return_recorded, PurchaseLineInput, PurchaseReturnLineInput};
 pub use commands::sale::{handle_sale_recorded, handle_sale_return_recorded, SaleLineInput, SaleReturnItemInput};

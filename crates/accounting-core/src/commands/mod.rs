@@ -52,6 +52,10 @@ pub fn commit_event(
         &tx, ctx.hlc, ctx.physical_now, &ctx.device_id, &ctx.user_id, event_type, &payload,
     )?;
     apply_event(&tx, &ev)?;
+    // An interactive delete marks the row rather than removing it (see
+    // `delete_master`); the removal happens here, where the projection is
+    // complete and up to date, so a delete still takes effect immediately.
+    crate::projectors::compact_deleted_master(&tx)?;
     tx.commit()?;
     Ok(ev)
 }
@@ -225,6 +229,122 @@ mod e2e {
         assert_eq!(rl_count, 1);
         let cost_restored: i64 = conn.query_row("SELECT cost_restored_minor FROM returns WHERE id='sret1'", [], |r| r.get(0)).unwrap();
         assert_eq!(cost_restored, 1500);
+    }
+
+    /// A cash sale stores its `customer_id` just like a credit sale does — the
+    /// walk-in party for an anonymous counter sale, a named party when the
+    /// customer is known but paid immediately. `sale_return` used to read that
+    /// customer and conclude the refund settles through Accounts Receivable, but
+    /// a cash sale has `outstanding_minor = 0`: nothing to reduce, so the entire
+    /// refund fell through as `excess` and landed as an unallocated credit the
+    /// customer was never owed. Two wrong outcomes from one wrong question —
+    /// only the terms say how a refund settles.
+    ///
+    /// Reachable today only by import, because no return command is registered in
+    /// `generate_handler!`. That registration is therefore load-bearing.
+    #[test]
+    fn a_cash_sale_return_refunds_the_till_and_leaves_the_party_flat() {
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("deviceA");
+        {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_account_opened(&mut c, "bank", "Bank", "asset", "debit", Some("bank")).unwrap();
+            handle_account_opened(&mut c, "inv", "Inventory", "asset", "debit", Some("inventory")).unwrap();
+            handle_account_opened(&mut c, "ar", "AR", "asset", "debit", Some("accounts_receivable")).unwrap();
+            handle_account_opened(&mut c, "sales_acct", "Sales", "income", "credit", Some("sales")).unwrap();
+            handle_account_opened(&mut c, "cogs_acct", "COGS", "expense", "debit", Some("cogs")).unwrap();
+            handle_party_created(&mut c, "sup1", "Sup", "supplier").unwrap();
+            handle_party_created(&mut c, "cust1", "Cust", "customer").unwrap();
+            handle_item_defined(&mut c, "itemA", "A", "A", "ea").unwrap();
+            handle_purchase_recorded(&mut c, "pur1", "sup1", "2026-01-01", "cash",
+                vec![PurchaseLineInput{ item_id:"itemA".into(), qty:10, unit_cost_minor:100 }]).unwrap();
+            handle_sale_recorded(&mut c, "sale1", "cust1", "2026-02-01", "cash",
+                vec![SaleLineInput{ item_id:"itemA".into(), qty:3, unit_price_minor:1000, lot_picks: None }]).unwrap();
+            handle_sale_return_recorded(&mut c, "sret1", "sale1", "2026-03-01",
+                vec![SaleReturnItemInput{ item_id:"itemA".into(), lot_returns: vec![("pur1#lot0".into(), 3)] }]).unwrap();
+        }
+        let credited = |conn: &rusqlite::Connection, role: &str| -> i64 {
+            conn.query_row(
+                "SELECT COALESCE(SUM(jl.credit_minor), 0) FROM journal_lines jl
+                 JOIN accounts a ON a.id = jl.account_id
+                 WHERE a.system_role = ?1 AND jl.txn_id = 'sret1'", [role], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(credited(&conn, "bank"), 3000, "a cash refund leaves the till");
+        assert_eq!(credited(&conn, "accounts_receivable"), 0,
+            "there is no receivable on a cash sale to cancel");
+        let cr: i64 = conn.query_row(
+            "SELECT COALESCE(unallocated_cr_minor, 0) FROM party_balances WHERE party_id = 'cust1'",
+            [], |r| r.get(0)).unwrap_or(0);
+        assert_eq!(cr, 0, "a cash refund is settled in full and owes the customer nothing");
+
+        // The credit path must keep working: that is what distinguishes the fix
+        // from simply always refunding the till.
+        {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_sale_recorded(&mut c, "sale2", "cust1", "2026-04-01", "credit",
+                vec![SaleLineInput{ item_id:"itemA".into(), qty:2, unit_price_minor:1000, lot_picks: None }]).unwrap();
+            handle_sale_return_recorded(&mut c, "sret2", "sale2", "2026-05-01",
+                vec![SaleReturnItemInput{ item_id:"itemA".into(), lot_returns: vec![("pur1#lot0".into(), 2)] }]).unwrap();
+        }
+        let ar2: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(jl.credit_minor), 0) FROM journal_lines jl
+             JOIN accounts a ON a.id = jl.account_id
+             WHERE a.system_role = 'accounts_receivable' AND jl.txn_id = 'sret2'", [], |r| r.get(0)).unwrap();
+        assert_eq!(ar2, 2000, "a credit return still cancels the receivable");
+        let out2: i64 = conn.query_row(
+            "SELECT outstanding_minor FROM sales WHERE id = 'sale2'", [], |r| r.get(0)).unwrap();
+        assert_eq!(out2, 0, "and still closes the invoice");
+    }
+
+    /// The mirror of the case above. Checked in the same pass, because a cash
+    /// purchase stores its `supplier_id` for exactly the same reason.
+    #[test]
+    fn a_cash_purchase_return_refunds_the_till_and_leaves_the_party_flat() {
+        let mut conn = open_in_memory_with_schema().unwrap();
+        let mut hlc = Hlc::new("deviceA");
+        {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_account_opened(&mut c, "bank", "Bank", "asset", "debit", Some("bank")).unwrap();
+            handle_account_opened(&mut c, "inv", "Inventory", "asset", "debit", Some("inventory")).unwrap();
+            handle_account_opened(&mut c, "ap", "AP", "liability", "credit", Some("accounts_payable")).unwrap();
+            handle_party_created(&mut c, "sup1", "Sup", "supplier").unwrap();
+            handle_item_defined(&mut c, "itemA", "A", "A", "ea").unwrap();
+            handle_purchase_recorded(&mut c, "pur1", "sup1", "2026-01-01", "cash",
+                vec![PurchaseLineInput{ item_id:"itemA".into(), qty:10, unit_cost_minor:100 }]).unwrap();
+            handle_purchase_return_recorded(&mut c, "pret1", "pur1", "2026-02-01",
+                vec![PurchaseReturnLineInput{ item_id:"itemA".into(), qty:4,
+                                              unit_cost_minor:100, lot_id:"pur1#lot0".into() }]).unwrap();
+        }
+        let debited = |conn: &rusqlite::Connection, role: &str| -> i64 {
+            conn.query_row(
+                "SELECT COALESCE(SUM(jl.debit_minor), 0) FROM journal_lines jl
+                 JOIN accounts a ON a.id = jl.account_id
+                 WHERE a.system_role = ?1 AND jl.txn_id = 'pret1'", [role], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(debited(&conn, "bank"), 400, "a cash refund comes back into the till");
+        assert_eq!(debited(&conn, "accounts_payable"), 0,
+            "there is no payable on a cash purchase to cancel");
+        let dr: i64 = conn.query_row(
+            "SELECT COALESCE(unallocated_dr_minor, 0) FROM party_balances WHERE party_id = 'sup1'",
+            [], |r| r.get(0)).unwrap_or(0);
+        assert_eq!(dr, 0, "and the supplier is left owing nothing");
+
+        {
+            let mut c = ctx(&mut conn, &mut hlc);
+            handle_purchase_recorded(&mut c, "pur2", "sup1", "2026-03-01", "credit",
+                vec![PurchaseLineInput{ item_id:"itemA".into(), qty:5, unit_cost_minor:100 }]).unwrap();
+            handle_purchase_return_recorded(&mut c, "pret2", "pur2", "2026-04-01",
+                vec![PurchaseReturnLineInput{ item_id:"itemA".into(), qty:5,
+                                              unit_cost_minor:100, lot_id:"pur2#lot0".into() }]).unwrap();
+        }
+        let ap2: i64 = conn.query_row(
+            "SELECT COALESCE(SUM(jl.debit_minor), 0) FROM journal_lines jl
+             JOIN accounts a ON a.id = jl.account_id
+             WHERE a.system_role = 'accounts_payable' AND jl.txn_id = 'pret2'", [], |r| r.get(0)).unwrap();
+        assert_eq!(ap2, 500, "a credit return still cancels the payable");
+        let out2: i64 = conn.query_row(
+            "SELECT outstanding_minor FROM purchases WHERE id = 'pur2'", [], |r| r.get(0)).unwrap();
+        assert_eq!(out2, 0, "and still closes the bill");
     }
 
     #[test]

@@ -53,6 +53,7 @@ export const en: Translations = {
     added: "Item added successfully.",
     close: "Close",
     addTooltip: "Add item",
+    editTitle: "Edit Item",
   },
   parties: {
     title: "Parties",
@@ -69,6 +70,8 @@ export const en: Translations = {
     close: "Close",
     addTooltip: "Add party",
     walkinCustomer: "Walk-in Customer",
+    editTitle: "Edit Party",
+    anonSupplier: "Cash Supplier",
   },
   purchases: {
     title: "Purchases",
@@ -139,6 +142,18 @@ export const en: Translations = {
     history: "Payment history",
     noPayments: "No payments recorded.",
     paidMade: "Supplier payment recorded.",
+    allocate: "Settle invoices",
+    allocateHint: "Leave blank to record the payment as an unallocated prepayment.",
+    invoice: "Invoice",
+    invoiceOutstanding: "Outstanding",
+    allocateAmount: "Amount to apply",
+    noOpenInvoices: "No unpaid invoices for this party.",
+    allocationTotal: "Total applied",
+    allocationExceeds: "Applied amount exceeds the payment.",
+    // Suffixed onto an archived party's name in the dropdown. An archived party
+    // appears only while it still owes or is owed something, so the label keeps
+    // the exception legible instead of looking like the filter failed.
+    archivedSuffix: "(archived — still outstanding)",
   },
   preferences: {
     title: "Preferences",
@@ -229,5 +244,17 @@ export const en: Translations = {
     voidConfirm: "Reason for voiding?",
     voided: "Entry voided.",
     edit: "Correct",
+    archive: "Archive",
+    restore: "Restore",
+    delete: "Delete",
+    deleteConfirm: "Permanently delete this? This cannot be undone.",
+    deleted: "Deleted.",
+    archived: "Archived.",
+    restored: "Restored.",
+    saved: "Changes saved.",
+    saving: "Saving...",
+    showArchived: "Show archived",
+    archivedBadge: "Archived",
+    status: "Status",
   },
 };
